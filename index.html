@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Privacy by construction: no network connections, plugins, frames or form posts are permitted. -->
+<meta http-equiv="Content-Security-Policy" content="connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="PixelPaint — a manual-first, offline, in-browser image editor. No AI, no uploads.">
+<title>PixelPaint</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23202227'/%3E%3Cpath d='M18.4 2.6a2 2 0 0 1 3 3L11 16l-3-3zM8 13c-2 0-4 1.5-4 4 0 1.5-1 2.5-2 3 3 1 7 0 8-3' fill='none' stroke='%234f9dff' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="menubar" class="menubar" role="menubar" aria-label="Main menu"></header>
+<div id="options" class="options" role="toolbar" aria-label="Tool options"></div>
+
+<main id="workspace" class="workspace">
+  <nav id="toolbar" class="toolbar" aria-label="Tools"></nav>
+  <div id="stage" class="stage">
+    <section id="empty" class="empty" aria-label="Start">
+      <h1>PixelPaint</h1>
+      <p>Manual-first image editing that runs entirely in your browser.<br>No AI. No uploads. Works offline.</p>
+      <div class="empty-actions">
+        <button type="button" id="empty-new" class="btn primary">New document</button>
+        <button type="button" id="empty-open" class="btn">Open image…</button>
+        <button type="button" id="empty-recover" class="btn ghost">Recover saved work</button>
+      </div>
+      <p class="note">Or drop an image anywhere · paste with Ctrl/⌘+V</p>
+    </section>
+  </div>
+  <aside id="panel" class="panel" aria-label="Panels"></aside>
+</main>
+
+<footer class="statusbar" aria-label="Status">
+  <input id="st-zoom" class="zoom-input" aria-label="Zoom percentage" autocomplete="off">
+  <span id="st-size"></span>
+  <span id="st-pos" title="Cursor position (document pixels)">—</span>
+  <span id="st-tool"></span>
+  <span id="st-sel"></span>
+  <span class="grow"></span>
+  <span id="st-busy" class="busy-ind" hidden></span>
+  <span id="st-save" title="Autosave status (this browser only)"></span>
+</footer>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div class="drop-hint" aria-hidden="true">Drop images to open</div>
+
+<script src="js/pixel.js"></script>
+<script src="js/core.js"></script>
+<script src="js/doc.js"></script>
+<script src="js/view.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/ops.js"></script>
+<script src="js/io.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
