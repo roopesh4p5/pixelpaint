@@ -329,7 +329,7 @@ def({
   },
   up() { if (!this.s) return; const s = this.s; this.s = null; PP.Ops.recordMove(s.l, s.x0, s.y0); },
   cancel() { if (this.s) { const l = this.s.l; l.x = this.s.x0; l.y = this.s.y0; this.s = null; bus.emit('pixels', { rect: null }); } },
-  key(e) {
+  onKey(e) {
     const k = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
     if (!k) return false;
     const l = PP.Ops.editableLayer({ any: true }); if (!l) return true;
@@ -427,7 +427,7 @@ def({
   dblclick() { if (this.pts) this.commit(); },
   commit() { const pts = this.pts; this.pts = null; this.hover = null; if (pts) finishPolygonSelection(pts, this.mode, 'Polygonal Lasso'); view().requestOverlay(); },
   cancel() { this.pts = null; this.hover = null; view().requestOverlay(); },
-  key(e) {
+  onKey(e) {
     if (!this.pts) return false;
     if (e.key === 'Backspace' || e.key === 'Delete') { this.pts.pop(); if (!this.pts.length) this.pts = null; view().requestOverlay(); return true; }
     if (e.key === 'Enter') { this.commit(); return true; }
@@ -492,7 +492,7 @@ def({
   dblclick() { this.commit(); },
   commit() { const pts = this.pts; this.pts = null; this.hover = null; if (pts) finishPolygonSelection(pts, this.mode, 'Magnetic Lasso'); view().requestOverlay(); },
   cancel() { this.pts = null; this.hover = null; view().requestOverlay(); },
-  key(e) {
+  onKey(e) {
     if (!this.pts) return false;
     if (e.key === 'Enter') { this.commit(); return true; }
     if (e.key === 'Backspace') { // remove back to previous anchor
@@ -672,7 +672,7 @@ def({
   dblclick() { this.commit(); },
   commit() { if (this.r) { const r = this.r; this.r = null; PP.Ops.crop(r, O().crop.delete); } },
   cancel() { this.r = null; this.a = null; this.drag = null; view().requestOverlay(); },
-  key(e) { if (e.key === 'Enter' && this.r) { this.commit(); return true; } return false; },
+  onKey(e) { if (e.key === 'Enter' && this.r) { this.commit(); return true; } return false; },
   overlay(g, v) {
     if (!this.r) return;
     const r = this.r, X = v.X(r.x), Y = v.Y(r.y), W = r.w * v.scale, H = r.h * v.scale;
@@ -751,7 +751,7 @@ function shapeTool(id, name, key, icon, kind) {
     hoverMove(e) { if (kind === 'polygon' && this.pts) { this.hover = { x: e.x, y: e.y }; view().requestOverlay(); } },
     up() { if (kind !== 'polygon') this.commit(); },
     dblclick() { if (kind === 'polygon') this.commit(); },
-    key(e) { if (kind === 'polygon' && this.pts && e.key === 'Enter') { this.commit(); return true; } if (kind === 'polygon' && this.pts && e.key === 'Backspace') { this.pts.pop(); if (!this.pts.length) this.pts = null; view().requestOverlay(); return true; } return false; },
+    onKey(e) { if (kind === 'polygon' && this.pts && e.key === 'Enter') { this.commit(); return true; } if (kind === 'polygon' && this.pts && e.key === 'Backspace') { this.pts.pop(); if (!this.pts.length) this.pts = null; view().requestOverlay(); return true; } return false; },
     commit() {
       this.hover = null;
       const G = this.geom(); this.a = this.b = null; this.pts = null;
@@ -835,7 +835,7 @@ def({
     PP.app.tools.select(this.prev || 'move');
   },
   cancel() { if (this.l) { this.l.xform = null; this.l = null; bus.emit('pixels', { rect: null }); } if (!PP.app.tools.switching) PP.app.tools.select(this.prev || 'move'); },
-  key(e) { if (e.key === 'Enter') { this.commit(); return true; } return false; },
+  onKey(e) { if (e.key === 'Enter') { this.commit(); return true; } return false; },
   overlay(g, v) {
     if (!this.l) return;
     const m = this.matrix(), l = this.l, c = [[0, 0], [l.w, 0], [l.w, l.h], [0, l.h]].map(([x, y]) => this.pt(m, x, y));

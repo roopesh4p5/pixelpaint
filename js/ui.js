@@ -681,7 +681,7 @@ function bindKeys() {
     const k = e.key, mod = e.ctrlKey || e.metaKey, t = app().tools, cur = t.current;
     if (k === ' ' && !e.repeat) { t.setSpace(true); e.preventDefault(); return; }
     if (k === ' ') { e.preventDefault(); return; }
-    if (!mod && cur && cur.key && cur.key(e)) { e.preventDefault(); return; }
+    if (!mod && cur && cur.onKey && cur.onKey(e)) { e.preventDefault(); return; }
     const run = fn => { e.preventDefault(); fn(); };
     if (mod) {
       const K = k.toLowerCase();
