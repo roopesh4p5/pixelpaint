@@ -418,7 +418,7 @@ async function storageDialog() {
   UI.dialog({ title: 'Storage', ok: 'Request persistence', fields: txt.map(t => ({ type: 'note', text: t })), onOk: async () => UI.toast((await IO().requestPersist()) ? 'Persistent storage granted' : 'Browser declined persistent storage', 'info') });
 }
 function shortcutsDialog() {
-  const rows = [['Open', MOD + 'O'], ['Save project', MOD + 'S'], ['Export', MOD + 'Shift+S'], ['Undo / Redo', `${MOD}Z / ${MOD}Y, ${MOD}Shift+Z`], ['Cut / Copy / Paste', `${MOD}X / ${MOD}C / ${MOD}V`], ['Copy merged', MOD + 'Shift+C'],
+  const rows = [['Open', MOD + 'O'], ['Save project', MOD + 'S'], ['Export', MOD + 'Shift+S'], ['Undo / Redo', `${MOD}Z / ${MOD}Y, ${MOD}Shift+Z`], ['Cut / Copy / Paste', `${MOD}X / ${MOD}C / ${MOD}V`], ['Move / duplicate selection', 'Drag inside it / Ctrl+drag'], ['Crop layer to selection', MOD + 'Shift+X'], ['Rename layer', 'F2 or double-click its name'], ['Pasted selection', 'Drag · handles resize · arrows nudge (Shift 10 px) · Enter places · Esc cancels'], ['Copy merged', MOD + 'Shift+C'],
     ['Select all / Deselect / Invert', `${MOD}A / ${MOD}D / ${MOD}Shift+I`], ['Free transform', MOD + 'T'], ['Copy selection to layer', MOD + 'J'], ['New layer', MOD + 'Shift+N'],
     ['Fit / 100% / Zoom ±', `${MOD}0 / ${MOD}1 / ${MOD}+ ${MOD}−`], ['Pan', 'Space+drag, middle mouse, wheel, two fingers'], ['Zoom at cursor', 'Ctrl/Alt+wheel, pinch'],
     ['Brush size', '[ / ]'], ['Swap / reset colours', 'X / D'], ['Delete selected pixels', 'Delete'], ['Cancel operation', 'Esc'],
@@ -430,25 +430,43 @@ function aboutDialog() {
   UI.dialog({ title: 'About PixelPaint', ok: null, cancel: 'Close', fields: [
     { type: 'note', text: 'PixelPaint 1.0 — a manual-first, algorithm-driven image editor. Plain HTML, CSS and JavaScript; no frameworks, no build step.' },
     { type: 'note', text: 'Zero AI: no machine learning, no LLMs, no generative models, no remote inference. Selections come from your own geometry; tools such as Magic Wand, Color Range, Magnetic Lasso and Healing use classical, deterministic algorithms (colour distance, scanline flood fill, Sobel gradients, mean-colour blending) and do not recognise objects.' },
-    { type: 'note', text: 'Privacy: images are processed and stored only in this browser. Nothing is uploaded; there is no telemetry.' }] });
+    { type: 'note', text: 'Privacy: images are processed and stored only in this browser. Nothing is uploaded; there is no telemetry.' }],
+  after: el('p', { class: 'credit' }, 'Developed by ', el('strong', { text: 'Roopesh' }), ' · ',
+    el('a', { href: 'https://github.com/roopesh4p5', target: '_blank', rel: 'noopener noreferrer', text: 'github.com/roopesh4p5' })) });
 }
 
 /* ───────────── menus ───────────── */
+/** Undo; with a floating selection, Ctrl+Z just takes the float back (MS Paint behaviour). */
+function undo() { // a live paste or transform is simply taken back first
+  const t = app().tools, live = !!app().floating || (t.current.id === 'transform' && t.current.tl); t.cancel(); if (!live) app().history.undo();
+}
+async function clearAll() {
+  const d = app().doc; if (!d) return;
+  if (!(await UI.confirm('Clear everything?', 'The image, its undo history and its autosaved copy will be thrown away without saving. This cannot be undone.', 'Clear all'))) return;
+  PP.App.closeDocument();
+  await IO().discard(d.id);
+  UI.toast('Cleared — start a new image or open one');
+}
+function renameDialog() {
+  const l = app().doc.active; if (!l) return;
+  UI.dialog({ title: 'Rename Layer', ok: 'Rename', values: { name: l.name }, fields: [{ key: 'name', label: 'Name', type: 'text' }],
+    onOk: v => { const n = String(v.name || '').trim().slice(0, 100); if (n) Ops().setLayerProps(l, { name: n }, 'Rename Layer'); } });
+}
 function needDoc(fn) { return (...a) => (app().doc ? fn(...a) : UI.toast('Open or create a document first', 'warn')); }
 function menus() {
   const O = Ops(), I = IO(), v = () => app().view, h = () => app().history, T = id => () => app().tools.select(id);
   const F = f => needDoc(() => filterFromDef(f)), A = k => needDoc(() => adjustDialog(k));
   return [
-    ['File', [['New…', MOD + 'N', newDocDialog], ['Open…', MOD + 'O', () => I.pickFiles({ newDoc: true })], ['Place Image as Layer…', '', needDoc(() => I.pickFiles())], ['Recover / Local Documents…', '', () => recoveryDialog(false)], '-',
+    ['File', [['New…', MOD + 'N', newDocDialog], ['Open…', MOD + 'O', () => I.pickFiles({ newDoc: true })], ['Place Image as Layer…', '', needDoc(() => I.pickFiles())], ['Recover / Local Documents…', '', () => recoveryDialog(false)], ['Clear All (Don’t Save)…', '', needDoc(clearAll)], '-',
       ['Save Project (.pforge)', MOD + 'S', needDoc(() => I.saveProject())], ['Export Image…', MOD + 'Shift+S', needDoc(exportDialog)], ['Quick Export PNG', '', needDoc(() => I.exportImage({ format: 'png', scope: 'flat' }))], '-', ['Storage…', '', storageDialog]]],
-    ['Edit', [['Undo', MOD + 'Z', () => { app().tools.cancel(); h().undo(); }, () => h().canUndo], ['Redo', MOD + 'Y', () => { app().tools.cancel(); h().redo(); }, () => h().canRedo], '-',
-      ['Cut', MOD + 'X', needDoc(() => O.copy(false, true))], ['Copy', MOD + 'C', needDoc(() => O.copy(false))], ['Copy Merged', MOD + 'Shift+C', needDoc(() => O.copy(true))], ['Paste', MOD + 'V', needDoc(() => O.pasteInternal() || UI.toast('Use ' + MOD + 'V to paste from the system clipboard'))], '-',
+    ['Edit', [['Undo', MOD + 'Z', undo, () => h().canUndo || !!app().floating], ['Redo', MOD + 'Y', () => { app().tools.cancel(); h().redo(); }, () => h().canRedo], '-',
+      ['Cut', MOD + 'X', needDoc(() => O.copy(false, true))], ['Copy', MOD + 'C', needDoc(() => O.copy(false))], ['Copy Merged', MOD + 'Shift+C', needDoc(() => O.copy(true))], ['Paste', MOD + 'V', needDoc(() => O.pasteInternal() || UI.toast('Use ' + MOD + 'V to paste from the system clipboard'))], ['Paste as New Layer', '', needDoc(() => O.pasteInternal(true) || UI.toast('Nothing copied yet', 'warn'))], '-',
       ['Fill with Foreground', '', needDoc(() => O.fillSelection('fg'))], ['Fill with Background', '', needDoc(() => O.fillSelection('bg'))], ['Stroke Selection…', '', needDoc(() => numberDialog('Stroke Selection', 'Width', 2, 0.5, 200, 'px', w => O.strokeSelection(w)))], ['Clear', 'Delete', needDoc(() => O.clearLayer())], '-',
       ['Free Transform', MOD + 'T', needDoc(T('transform'))], ['Flip Layer Horizontal', '', needDoc(() => O.flipLayer(true))], ['Flip Layer Vertical', '', needDoc(() => O.flipLayer(false))]]],
-    ['Image', [['Image Size…', '', needDoc(imageSizeDialog)], ['Canvas Size…', '', needDoc(canvasSizeDialog)], ['Crop to Selection', '', needDoc(() => O.cropToSelection())], ['Trim Transparent', '', needDoc(() => O.trim())], '-',
+    ['Image', [['Image Size…', '', needDoc(imageSizeDialog)], ['Canvas Size…', '', needDoc(canvasSizeDialog)], ['Crop Canvas to Selection (all layers)', '', needDoc(() => O.cropToSelection())], ['Trim Transparent', '', needDoc(() => O.trim())], '-',
       ['Rotate 90° CW', '', needDoc(() => O.rotateImage('cw'))], ['Rotate 90° CCW', '', needDoc(() => O.rotateImage('ccw'))], ['Rotate 180°', '', needDoc(() => O.rotateImage('180'))], ['Flip Canvas Horizontal', '', needDoc(() => O.rotateImage('flipH'))], ['Flip Canvas Vertical', '', needDoc(() => O.rotateImage('flipV'))], '-',
       ['Chroma Key…', '', needDoc(chromaKeyDialog)]]],
-    ['Layer', [['New Layer', MOD + 'Shift+N', needDoc(() => O.newLayer())], ['Duplicate Layer', '', needDoc(() => O.duplicateLayer())], ['Delete Layer', '', needDoc(() => O.deleteLayer())], '-',
+    ['Layer', [['New Layer', MOD + 'Shift+N', needDoc(() => O.newLayer())], ['Duplicate Layer', '', needDoc(() => O.duplicateLayer())], ['Rename Layer…', 'F2', needDoc(renameDialog)], ['Crop Layer to Selection', MOD + 'Shift+X', needDoc(() => O.cropLayer())], ['Delete Layer', '', needDoc(() => O.deleteLayer())], ['Import Image into Layer…', '', needDoc(() => I.pickFiles({ intoLayer: true }))], '-',
       ['Copy Selection to New Layer', MOD + 'J', needDoc(() => O.copySelectionToLayer(false))], ['Cut Selection to New Layer', MOD + 'Shift+J', needDoc(() => O.copySelectionToLayer(true))], '-',
       ['Add Mask: Reveal All', '', needDoc(() => O.addMask('reveal'))], ['Add Mask: Hide All', '', needDoc(() => O.addMask('hide'))], ['Add Mask from Selection', '', needDoc(() => O.addMask('selection'))], ['Apply Mask', '', needDoc(() => O.applyMask())], ['Delete Mask', '', needDoc(() => O.deleteMask())], ['Load Mask as Selection', '', needDoc(() => O.maskToSelection())], '-',
       ['Rasterize Text', '', needDoc(() => app().doc.active && O.rasterize(app().doc.active))], ['Merge Down', '', needDoc(() => O.mergeDown())], ['Merge Visible', '', needDoc(() => O.mergeVisible())], ['Flatten Image', '', needDoc(() => O.flatten())]]],
@@ -493,7 +511,7 @@ function buildMenubar() {
       for (const it of items) {
         if (it === '-') { list.append(el('div', { class: 'sep', role: 'separator' })); continue; }
         const [label, key, fn, enabled] = it, dis = enabled && !enabled();
-        list.append(el('button', { type: 'button', role: 'menuitem', class: 'menu-item', disabled: dis, onclick: () => { closeAll(); fn(); } }, el('span', { text: label }), el('kbd', { text: key || '' })));
+        list.append(el('button', { type: 'button', role: 'menuitem', class: 'menu-item', disabled: dis, onclick: () => { closeAll(); if (!/^(Undo|Cut|Copy|Paste)/.test(label)) PP.Tools.settleFloat(); fn(); } }, el('span', { text: label }), el('kbd', { text: key || '' })));
       }
     };
     btn.addEventListener('click', e => { e.stopPropagation(); const was = open === m; closeAll(); if (!was) { fill(); m.classList.add('open'); btn.setAttribute('aria-expanded', 'true'); open = m; const r = btn.getBoundingClientRect(); list.style.left = Math.min(r.left, window.innerWidth - 260) + 'px'; list.style.top = r.bottom + 'px'; } });
@@ -502,16 +520,25 @@ function buildMenubar() {
   }
   document.addEventListener('pointerdown', e => { if (open && !open.contains(e.target)) closeAll(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && open) { closeAll(); e.stopPropagation(); } }, true);
-  bar.append(el('span', { class: 'grow' }), el('button', { type: 'button', class: 'icon-btn panel-toggle', 'aria-label': 'Toggle panels', title: 'Toggle panels (Tab)', onclick: togglePanels }, icon('M3 4h18v16H3zM15 4v16')));
+  bar.append(el('span', { class: 'grow' }),
+    el('button', { type: 'button', class: 'btn small danger clear-all', text: 'Clear all', title: 'Discard the image without saving and start over', onclick: needDoc(clearAll) }),
+    el('button', { type: 'button', class: 'icon-btn panel-toggle', 'aria-label': 'Toggle panels', title: 'Toggle panels (Tab)', onclick: togglePanels }, icon('M3 4h18v16H3zM15 4v16')));
 }
 
 /* ───────────── toolbar & colours ───────────── */
 function buildToolbar() {
   const tb = $('#toolbar'); tb.replaceChildren();
-  const groups = [['move', 'hand', 'zoom'], ['rect-select', 'ellipse-select', 'lasso', 'poly-lasso', 'magnetic-lasso', 'wand', 'color-range', 'mask-brush'], ['brush', 'pencil', 'eraser', 'fill', 'picker', 'clone', 'heal'], ['crop', 'text', 'line', 'arrow', 'rect', 'rrect', 'ellipse', 'polygon']];
+  const groups = [['move', 'hand'], ['rect-select', 'ellipse-select', 'smart-select', 'quick-select', '!sel-add', '!sel-remove', '!crop-sel', 'lasso', 'poly-lasso', 'magnetic-lasso', 'wand', 'color-range'], ['brush', 'pencil', 'eraser', 'fill', 'picker', 'clone', 'heal'], ['crop', 'text', 'line', 'arrow', 'rect', 'rrect', 'ellipse', 'polygon', 'skin']];
   for (const g of groups) {
     const box = el('div', { class: 'tool-group', role: 'group' });
     for (const id of g) {
+      if (id === '!sel-add' || id === '!sel-remove') { // the selection brush, split into two obvious buttons
+        const add = id === '!sel-add', mode = add ? 'reveal' : 'hide';
+        box.append(el('button', { type: 'button', class: 'tool', 'data-brush': mode, title: add ? 'Add to selection brush (Q) — paint to add, right-drag removes' : 'Remove from selection brush — paint to remove, right-drag adds', 'aria-label': add ? 'Add to selection brush' : 'Remove from selection brush', onclick: needDoc(() => PP.Tools.selBrush(mode)) },
+          icon('M4 20c2 0 3.5-1.3 3.5-3a1.75 1.75 0 0 0-3.5 0M7.5 16.5L15 9' + (add ? 'M18 3v6M15 6h6' : 'M15 6h6'))));
+        continue;
+      }
+      if (id === '!crop-sel') { box.append(el('button', { type: 'button', class: 'tool action', title: 'Crop selected layer to selection (' + MOD + 'Shift+X) — other layers untouched', 'aria-label': 'Crop layer to selection', onclick: needDoc(() => Ops().cropLayer()) }, icon('M6 2v14h14M2 6h14v14M9 9h4v4H9z'))); continue; }
       const t = PP.Tools.list.find(x => x.id === id);
       box.append(el('button', { type: 'button', class: 'tool', 'data-tool': id, title: t.name + (t.key ? ` (${t.key.toUpperCase()})` : ''), 'aria-label': t.name, 'aria-pressed': 'false', onclick: () => app().tools.select(id) }, icon(t.icon)));
     }
@@ -523,10 +550,18 @@ function buildToolbar() {
     el('label', { class: 'sw bg', title: 'Background colour' }, bgI), el('label', { class: 'sw fg', title: 'Foreground colour' }, fgI),
     el('button', { type: 'button', class: 'mini swap', title: 'Swap (X)', 'aria-label': 'Swap colours', text: '⇄', onclick: () => Ops().swapColors() }),
     el('button', { type: 'button', class: 'mini reset', title: 'Reset (D)', 'aria-label': 'Reset colours', text: '◩', onclick: () => Ops().resetColors() }));
-  tb.append(sw);
+  // MS Paint's classic 20 colours: click = foreground, right-click = background
+  const PALETTE = ['#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4',
+    '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7'];
+  const pal = el('div', { class: 'palette', role: 'group', 'aria-label': 'Colour palette' }, PALETTE.map(c => el('button', {
+    type: 'button', class: 'pal', style: 'background:' + c, title: c + ' — click: foreground · right-click: background', 'aria-label': 'Colour ' + c,
+    onclick: () => Ops().setColor('fg', c), oncontextmenu: e => { e.preventDefault(); Ops().setColor('bg', c); }
+  })));
+  tb.append(sw, pal);
   const paint = () => { const c = app().colors; fgI.value = c.fg; bgI.value = c.bg; fgI.parentNode.style.background = c.fg; bgI.parentNode.style.background = c.bg; };
   bus.on('colors', () => { paint(); IO().savePrefs(); }); paint();
-  bus.on('tool', t => { tb.querySelectorAll('.tool').forEach(b => { const on = b.dataset.tool === t.id; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); }); });
+  bus.on('tool', t => { const id = t.hidden && t.prev ? t.prev : t.id; tb.querySelectorAll('.tool').forEach(b => { const on = b.dataset.tool === id; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+    tb.querySelectorAll('[data-brush]').forEach(b => { const on = t.id === 'mask-brush' && app().opts.maskBrush.mode === b.dataset.brush; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); }); });
 }
 
 /* ───────────── options bar (contextual) ───────────── */
@@ -568,8 +603,9 @@ function buildOptions(tool) {
 }
 
 /* ───────────── panels ───────────── */
-function section(id, title, body, actions) {
-  const open = app().panels[id] !== false;
+/** startClosed: always begins collapsed on load (can still be opened for the session). */
+function section(id, title, body, actions, startClosed = false) {
+  const open = !startClosed && app().panels[id] !== false;
   const head = el('button', { type: 'button', class: 'sec-head', 'aria-expanded': String(open) }, el('span', { text: title }));
   const s = el('section', { class: 'panel-sec' + (open ? '' : ' closed'), id: 'sec-' + id }, el('div', { class: 'sec-bar' }, head, actions || null), el('div', { class: 'sec-body' }, body));
   head.addEventListener('click', () => { const o = s.classList.toggle('closed'); head.setAttribute('aria-expanded', String(!o)); app().panels[id] = !o; IO().savePrefs(); });
@@ -578,21 +614,20 @@ function section(id, title, body, actions) {
 
 function buildLayersPanel() {
   const list = el('ul', { class: 'layers', role: 'listbox', 'aria-label': 'Layers' });
-  const blend = el('select', { 'aria-label': 'Blend mode' }, Object.keys(PP.Model.BLEND).map(k => el('option', { value: k, text: k.replace('-', ' ').replace(/^./, c => c.toUpperCase()) })));
   const op = el('input', { type: 'range', min: 0, max: 100, 'aria-label': 'Layer opacity' }), opN = el('span', { class: 'unit' });
   let opStart = null;
-  blend.addEventListener('change', () => { const l = app().doc.active; if (l) Ops().setLayerProps(l, { blend: blend.value }, 'Blend Mode'); });
   op.addEventListener('input', () => { const l = app().doc.active; if (!l) return; if (opStart == null) opStart = l.opacity; l.opacity = op.value / 100; opN.textContent = op.value + '%'; bus.emit('pixels', { rect: null }); });
   op.addEventListener('change', () => { const l = app().doc.active; if (!l || opStart == null) return; const v = op.value / 100; l.opacity = opStart; opStart = null; Ops().setLayerProps(l, { opacity: v }, 'Layer Opacity'); });
   const B = (label, d, fn) => el('button', { type: 'button', class: 'icon-btn', title: label, 'aria-label': label, onclick: needDoc(fn) }, icon(d, 18));
   const O = Ops();
   const foot = el('div', { class: 'layer-actions' },
-    B('New layer', 'M12 5v14M5 12h14', () => O.newLayer()), B('Duplicate layer', 'M8 8h12v12H8zM4 16V4h12', () => O.duplicateLayer()),
+    B('New layer', 'M12 5v14M5 12h14', () => O.newLayer()), B('Rename layer (F2)', 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', renameDialog), B('Duplicate layer', 'M8 8h12v12H8zM4 16V4h12', () => O.duplicateLayer()),
+    B('Import image into this layer', 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15 9.5a1.5 1.5 0 1 0 0-.01', () => IO().pickFiles({ intoLayer: true })),
     B('Add mask (from selection if any)', 'M4 4h16v16H4zM12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8', () => O.addMask(app().doc.selection.active ? 'selection' : 'reveal')),
     B('Move layer up', 'M12 19V5M6 11l6-6 6 6', () => { const d = app().doc, l = d.active; l && O.moveLayer(l, d.index(l) + 1); }),
     B('Move layer down', 'M12 5v14M6 13l6 6 6-6', () => { const d = app().doc, l = d.active; l && O.moveLayer(l, d.index(l) - 1); }),
     B('Merge down', 'M12 4v10M7 9l5 5 5-5M5 20h14', () => O.mergeDown()), B('Delete layer', 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13', () => O.deleteLayer()));
-  const ctrl = el('div', { class: 'layer-ctrl' }, blend, el('label', { class: 'op' }, el('span', { text: 'Opacity' }), op, opN));
+  const ctrl = el('div', { class: 'layer-ctrl' }, el('label', { class: 'op' }, el('span', { text: 'Opacity' }), op, opN));
   const thumbs = new Map();
   const drawThumb = (c, src) => {
     const g = c.getContext('2d'), k = Math.min(c.width / src.width, c.height / src.height);
@@ -604,14 +639,14 @@ function buildLayersPanel() {
     const d = app().doc; list.replaceChildren(); thumbs.clear();
     if (!d) return;
     const a = d.active;
-    blend.value = a ? a.blend : 'normal'; op.value = a ? Math.round(a.opacity * 100) : 100; opN.textContent = op.value + '%';
+    op.value = a ? Math.round(a.opacity * 100) : 100; opN.textContent = op.value + '%';
     for (let i = d.layers.length - 1; i >= 0; i--) {
       const l = d.layers[i], active = l === a;
       const tc = el('canvas', { class: 'thumb' + (active && app().target !== 'mask' ? ' target' : ''), width: 40, height: 40, title: 'Edit layer pixels' });
       const mc = l.mask ? el('canvas', { class: 'thumb mask' + (active && app().target === 'mask' ? ' target' : '') + (l.maskEnabled ? '' : ' off'), width: 40, height: 40, title: 'Edit mask (Shift+click: enable/disable)' }) : null;
       drawThumb(tc, l.canvas); if (mc) { const g = mc.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, 40, 40); const t = U.canvas(l.mask.width, l.mask.height), tg = t.getContext('2d'); tg.fillStyle = '#fff'; tg.fillRect(0, 0, t.width, t.height); tg.globalCompositeOperation = 'destination-in'; tg.drawImage(l.mask, 0, 0); drawThumb(mc, t); g.globalCompositeOperation = 'destination-over'; g.fillRect(0, 0, 40, 40); }
       thumbs.set(l.id, { tc, rev: l.rev, l });
-      const name = el('span', { class: 'lname', text: l.name + (l.type === 'text' ? '  T' : '') });
+      const name = el('span', { class: 'lname', title: 'Double-click to rename', text: l.name + (l.type === 'text' ? '  T' : '') });
       name.addEventListener('dblclick', () => {
         const inp = el('input', { type: 'text', value: l.name, class: 'rename', 'aria-label': 'Layer name' });
         name.replaceWith(inp); inp.focus(); inp.select();
@@ -640,6 +675,39 @@ function buildLayersPanel() {
   return section('layers', 'Layers', el('div', null, ctrl, list, foot));
 }
 
+function buildTransformPanel() {
+  const O = Ops(), info = el('p', { class: 'note' }), L = () => app().doc && app().doc.active;
+  const num = label => el('input', { type: 'number', 'aria-label': label, step: 1 });
+  const wI = num('Width'), hI = num('Height'), xI = num('X position'), yI = num('Y position'), aI = num('Angle'), ratio = el('input', { type: 'checkbox', checked: true, 'aria-label': 'Keep ratio' });
+  aI.value = 15;
+  const B = (t, fn, title) => el('button', { type: 'button', class: 'btn small', text: t, title, onclick: needDoc(fn) });
+  const resize = () => O.resizeLayer(+wI.value, +hI.value), moveTo = () => O.moveLayerTo(+xI.value, +yI.value), rotate = () => O.rotateLayer(+aI.value);
+  const scale = k => { const l = L(); if (l) O.resizeLayer(Math.max(1, l.w * k), Math.max(1, l.h * k), k < 1 ? 'Shrink Layer' : 'Enlarge Layer'); };
+  wI.addEventListener('input', () => { const l = L(); if (ratio.checked && l && +wI.value > 0) hI.value = Math.max(1, Math.round((+wI.value * l.h) / l.w)); });
+  hI.addEventListener('input', () => { const l = L(); if (ratio.checked && l && +hI.value > 0) wI.value = Math.max(1, Math.round((+hI.value * l.w) / l.h)); });
+  const onEnter = (inputs, fn) => inputs.forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') needDoc(fn)(); }));
+  onEnter([wI, hI], resize); onEnter([xI, yI], moveTo); onEnter([aI], rotate);
+  const row = (...k) => el('div', { class: 'xf-row' }, ...k), lab = t => el('span', { class: 'xf-lab', text: t });
+  const body = el('div', { class: 'xf-panel' }, info,
+    el('h4', { text: 'Rotate & flip' }),
+    el('div', { class: 'btn-grid' }, B('⟲ 90°', () => O.rotateLayer(-90), 'Rotate left'), B('⟳ 90°', () => O.rotateLayer(90), 'Rotate right'), B('180°', () => O.rotateLayer(180)),
+      B('Flip ↔', () => O.flipLayer(true), 'Mirror horizontally'), B('Flip ↕', () => O.flipLayer(false), 'Mirror vertically')),
+    row(lab('Angle'), aI, el('span', { class: 'unit', text: '°' }), B('Rotate', rotate)),
+    el('h4', { text: 'Size' }),
+    row(lab('W'), wI, lab('H'), hI, el('label', { class: 'xf-check' }, ratio, 'Keep ratio')),
+    el('div', { class: 'btn-grid' }, B('Apply size', resize), B('50%', () => scale(0.5)), B('200%', () => scale(2)), B('Fit canvas', () => O.fitLayer(), 'Scale to fit the canvas and centre')),
+    el('h4', { text: 'Position' }),
+    row(lab('X'), xI, lab('Y'), yI, B('Move', moveTo)),
+    el('div', { class: 'btn-grid' }, B('Centre', () => O.centerLayer()), B('Free transform', () => app().tools.select('transform'), MOD + 'T — drag handles to scale and rotate')));
+  const upd = () => {
+    const l = L();
+    info.textContent = l ? `“${l.name}” · ${l.w} × ${l.h} px at ${l.x}, ${l.y}` : 'No layer selected.';
+    for (const [i, v] of [[wI, l && l.w], [hI, l && l.h], [xI, l && l.x], [yI, l && l.y]]) if (document.activeElement !== i) i.value = v == null ? '' : v;
+  };
+  bus.on('layers', upd); bus.on('history', upd); bus.on('docsize', upd); upd();
+  return section('transform', 'Transform Layer', body);
+}
+
 function buildSelectionPanel() {
   const O = Ops(), info = el('p', { class: 'note sel-info' });
   const B = (t, fn, cls) => el('button', { type: 'button', class: 'btn small ' + (cls || ''), text: t, onclick: needDoc(fn) });
@@ -649,10 +717,10 @@ function buildSelectionPanel() {
     el('h4', { text: 'Refine edge' }),
     el('div', { class: 'btn-grid' }, N('Feather', 'feather', 2, 250), N('Expand', 'expand', 2, 500), N('Contract', 'contract', 2, 500), N('Smooth', 'smooth', 3, 100), N('Border', 'border', 4, 500), B('Mask brush', () => app().tools.select('mask-brush'))),
     el('h4', { text: 'Cut out' }),
-    el('div', { class: 'btn-grid' }, B('Remove outside', () => O.removeByMask(true), 'primary'), B('Remove inside', () => O.removeByMask(false)), B('Copy → layer', () => O.copySelectionToLayer(false)), B('Cut → layer', () => O.copySelectionToLayer(true)), B('Layer mask', () => O.addMask('selection')), B('Save', () => O.saveSelection())));
+    el('div', { class: 'btn-grid' }, B('Remove outside', () => O.removeByMask(true), 'primary'), B('Remove inside', () => O.removeByMask(false)), B('Crop layer', () => O.cropLayer()), B('Copy → layer', () => O.copySelectionToLayer(false)), B('Cut → layer', () => O.copySelectionToLayer(true)), B('Layer mask', () => O.addMask('selection')), B('Save', () => O.saveSelection())));
   const upd = () => { const d = app().doc, b = d && d.selection.bounds; info.textContent = b ? `Selection: ${b.w} × ${b.h} at ${b.x}, ${b.y}` : 'No selection. Use a selection tool (M, L, W) to start.'; refreshStatus(); };
   bus.on('selection', upd); upd();
-  return section('selection', 'Selection & Cutout', body);
+  return section('selection', 'Selection & Cutout', body, null, true);
 }
 
 function buildHistoryPanel() {
@@ -667,8 +735,8 @@ function buildHistoryPanel() {
   };
   bus.on('history', render);
   return section('history', 'History', el('div', null, list, mem), el('div', { class: 'sec-actions' },
-    el('button', { type: 'button', class: 'icon-btn', title: 'Undo', 'aria-label': 'Undo', onclick: () => { app().tools.cancel(); app().history.undo(); } }, icon('M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3', 16)),
-    el('button', { type: 'button', class: 'icon-btn', title: 'Redo', 'aria-label': 'Redo', onclick: () => { app().tools.cancel(); app().history.redo(); } }, icon('M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3', 16))));
+    el('button', { type: 'button', class: 'icon-btn', title: 'Undo', 'aria-label': 'Undo', onclick: undo }, icon('M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3', 16)),
+    el('button', { type: 'button', class: 'icon-btn', title: 'Redo', 'aria-label': 'Redo', onclick: () => { app().tools.cancel(); app().history.redo(); } }, icon('M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3', 16))), true);
 }
 
 /* ───────────── keyboard ───────────── */
@@ -685,16 +753,19 @@ function bindKeys() {
     const run = fn => { e.preventDefault(); fn(); };
     if (mod) {
       const K = k.toLowerCase();
-      if (K === 'z' && !e.shiftKey) return run(() => { t.cancel(); app().history.undo(); });
+      if (K === 'z' && !e.shiftKey) return run(undo);
       if ((K === 'z' && e.shiftKey) || K === 'y') return run(() => { t.cancel(); app().history.redo(); });
       if (K === 'o') return run(() => I.pickFiles({ newDoc: true }));
       if (K === 'n' && e.shiftKey) return run(needDoc(() => O.newLayer()));
       if (K === 'n') return run(newDocDialog);
       if (!app().doc) return;
+      if (app().floating && K.length === 1 && 'saidtj'.includes(K)) PP.Tools.settleFloat(); // Ctrl+C/X/V act on the float itself
       if (K === 's' && e.shiftKey) return run(exportDialog);
       if (K === 's') return run(() => I.saveProject());
+      if (K === 'v' && !e.shiftKey && app().clipboard && app().clipboardFresh) return run(() => O.pasteInternal()); // own copy: no need to wait for the browser paste event
       if (K === 'c' && e.shiftKey) return run(() => O.copy(true));
       if (K === 'c') return run(() => O.copy(false));
+      if (K === 'x' && e.shiftKey) return run(() => O.cropLayer());
       if (K === 'x') return run(() => O.copy(false, true));
       if (K === 'a') return run(() => O.selectAll());
       if (K === 'd') return run(() => O.deselect());
@@ -711,6 +782,7 @@ function bindKeys() {
     if (k === 'Escape') return run(() => t.cancel());
     if (k === 'Delete' || k === 'Backspace') return run(() => O.clearLayer());
     if (k === 'Tab') return run(togglePanels);
+    if (k === 'F2') return run(renameDialog);
     if (k === '?') return run(shortcutsDialog);
     if (k === '[' || k === ']') return run(() => { const b = app().opts.brush; b.size = U.clamp(Math.round(b.size * (k === ']' ? 1.15 : 1 / 1.15) + (k === ']' ? 1 : -1)), 1, 1000); UI.refreshOptions && UI.refreshOptions(); app().view.requestOverlay(); I.savePrefs(); });
     if (k === 'x' || k === 'X') return run(() => O.swapColors());
@@ -725,7 +797,7 @@ function bindKeys() {
 /* ───────────── build ───────────── */
 UI.build = function () {
   buildMenubar(); buildToolbar();
-  const panel = $('#panel'); panel.replaceChildren(buildLayersPanel(), buildSelectionPanel(), buildHistoryPanel());
+  const panel = $('#panel'); panel.replaceChildren(buildLayersPanel(), buildTransformPanel(), buildSelectionPanel(), buildHistoryPanel());
   bus.on('tool', t => { buildOptions(t); refreshStatus(); });
   bus.on('options-values', () => UI.refreshOptions && UI.refreshOptions());
   bus.on('view', refreshStatus); bus.on('docsize', refreshStatus); bus.on('selection', refreshStatus);

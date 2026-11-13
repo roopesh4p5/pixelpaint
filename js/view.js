@@ -8,14 +8,14 @@
  */
 (function () {
 'use strict';
-const PP = window.PP, U = PP.Util, bus = PP.bus, BLEND = PP.Model.BLEND;
+const PP = window.PP, U = PP.Util, bus = PP.bus;
 const ZOOMS = [0.01, 0.02, 0.03, 0.05, 0.0625, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
 
 class View {
   constructor(stage) {
     this.stage = stage;
     this.main = U.el('canvas', { class: 'view-main', 'aria-label': 'Document canvas' });
-    this.over = U.el('canvas', { class: 'view-over', 'aria-hidden': 'true' });
+    this.over = U.el('canvas', { class: 'view-over', 'aria-hidden': 'true', tabindex: '-1' });
     stage.append(this.main, this.over);
     this.mx = this.main.getContext('2d', { alpha: false });
     this.ox_ = this.over.getContext('2d');
@@ -119,7 +119,7 @@ class View {
 
   /** Composite visible layers into the document-size cache (optionally only a rect). */
   recomposite(r) {
-    const d = PP.app.doc, x = this.cx;
+    const d = PP.app.doc, x = this.cx, fl = PP.app.floating;
     x.save();
     x.setTransform(1, 0, 0, 1, 0, 0);
     if (r) { x.beginPath(); x.rect(r.x, r.y, r.w, r.h); x.clip(); x.clearRect(r.x, r.y, r.w, r.h); }
@@ -127,9 +127,9 @@ class View {
     for (const l of d.layers) {
       if (!l.visible || l.opacity <= 0) continue;
       x.globalAlpha = l.opacity;
-      x.globalCompositeOperation = BLEND[l.blend] || 'source-over';
       if (l.xform) { const m = l.xform; x.save(); x.imageSmoothingQuality = 'high'; x.transform(m.a, m.b, m.c, m.d, m.e, m.f); x.drawImage(l.source(), 0, 0); x.restore(); }
       else x.drawImage(l.source(), l.x, l.y);
+      if (fl && fl.layer === l && !fl.ownLayer) { x.save(); x.imageSmoothingQuality = 'high'; x.drawImage(fl.image(), fl.x, fl.y, fl.w, fl.h); x.restore(); }
     }
     x.restore();
   }

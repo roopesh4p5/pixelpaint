@@ -25,7 +25,7 @@ class Layer {
     this.visible = o.visible !== false;
     this.locked = !!o.locked;
     this.opacity = o.opacity == null ? 1 : o.opacity;
-    this.blend = BLEND[o.blend] ? o.blend : 'normal';
+    this.blend = 'normal';                    // blend modes removed from the UI; kept for project-file compatibility
     this.x = o.x || 0; this.y = o.y || 0;
     this.canvas = o.canvas || U.canvas(o.w || 1, o.h || 1);
     this.mask = o.mask || null;               // canvas, alpha = mask value (255 reveal)
@@ -157,7 +157,32 @@ class Doc {
   setActive(layer) { this.activeId = layer ? layer.id : null; bus.emit('layers'); }
 }
 
-/* ───────────── History (command based) ───────────── */
+/* ───────────── History (command based) ─────────────
+ * Entries are plain data plus a kind, so io.js can persist them and rebuild them after a reload.
+ * kinds: pixels {layer,target,tiles,area} · doc {before,after snapshots} · sel {before,after rle,n}
+ *        move {layer,x0,y0,dx,dy} · text {layer,before,after}
+ * Any entry may also carry selBefore/selAfter (rle|null, n = selN) restored after its own change. */
+const KINDS = {
+  pixels(e, k) { const l = e.layer, c = e.target === 'mask' ? l.mask : l.canvas; if (!c) return; for (const t of e.tiles) U.write(c, t[k], t.x, t.y); l.touch(e.area); },
+  doc(e, k) { docRestore(PP.app.doc, e[k]); },
+  sel(e, k) { PP.app.doc.selection.set(e[k] ? P.rleDecode(e[k], e.n) : null); },
+  move(e, k) {
+    const l = e.layer, m = k === 'after' ? 1 : 0;
+    l.x = e.x0 + e.dx * m; l.y = e.y0 + e.dy * m;
+    if (l.text) { l.text.ax += m ? e.dx : -e.dx; l.text.ay += m ? e.dy : -e.dy; }
+    bus.emit('pixels', { rect: null }); bus.emit('layers');
+  },
+  text(e, k) { const l = e.layer, t = e[k]; l.text = Object.assign({}, t); renderText(l); l.name = (t.text.split('\n')[0] || 'Text').slice(0, 32); bus.emit('layers'); }
+};
+function runEntry(e, k) {
+  KINDS[e.kind](e, k);
+  const sk = k === 'before' ? 'selBefore' : 'selAfter';
+  if (sk in e) PP.app.doc.selection.set(e[sk] ? P.rleDecode(e[sk], e.selN) : null);
+}
+function entry(kind, label, data, bytes = 0, uid) {
+  return Object.assign({ kind, label, bytes, uid: uid || U.uid() }, data, { undo() { runEntry(this, 'before'); }, redo() { runEntry(this, 'after'); } });
+}
+
 class History {
   constructor() { this.stack = []; this.index = -1; this.bytes = 0; this.base = 'Open'; }
   clear(base = 'Open') { this.stack = []; this.index = -1; this.bytes = 0; this.base = base; bus.emit('history'); }
@@ -202,8 +227,7 @@ class PixelEdit {
     const tiles = [...this.tiles.values()], layer = this.layer, getC = () => (this.target === 'mask' ? layer.mask : layer.canvas);
     let bytes = 0, area = null;
     for (const t of tiles) { t.after = U.read(getC(), t.x, t.y, t.before.width, t.before.height); bytes += t.before.data.length * 2; area = U.union(area, { x: t.x, y: t.y, w: t.before.width, h: t.before.height }); }
-    const apply = key => { const c = getC(); if (!c) return; for (const t of tiles) U.write(c, t[key], t.x, t.y); layer.touch(area); };
-    PP.app.history.push({ label, bytes, undo: () => apply('before'), redo: () => apply('after') });
+    PP.app.history.push(entry('pixels', label, { layer, target: this.target, tiles, area }, bytes));
     this.tiles.clear();
     return true;
   }
@@ -243,8 +267,8 @@ function docCommand(label, fn) {
   if (fn(doc) === false) return false;
   const after = docSnapshot(doc);
   bus.emit('docsize'); bus.emit('layers'); bus.emit('pixels', { rect: null });
-  PP.app.history.push({ label, bytes: snapBytes(before, after), undo: () => docRestore(doc, before), redo: () => docRestore(doc, after) });
+  PP.app.history.push(entry('doc', label, { before, after }, snapBytes(before, after)));
 }
 
-PP.Model = { Layer, Doc, Selection, History, PixelEdit, BLEND, TEXT_DEFAULTS, renderText, docCommand, docSnapshot, docRestore };
+PP.Model = { Layer, Doc, Selection, History, PixelEdit, BLEND, TEXT_DEFAULTS, renderText, docCommand, docSnapshot, docRestore, entry };
 })();

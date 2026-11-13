@@ -30,8 +30,7 @@ Ops.setSelection = function (mask, label = 'Selection') {
   const before = sel.mask ? P.rleEncode(sel.mask) : null;
   sel.set(mask);
   const after = sel.mask ? P.rleEncode(sel.mask) : null;
-  const restore = r => sel.set(r ? P.rleDecode(r, n) : null);
-  H().push({ label, bytes: (before ? before.length : 0) + (after ? after.length : 0), undo: () => restore(before), redo: () => restore(after) });
+  H().push(M.entry('sel', label, { before, after, n }, (before ? before.length : 0) + (after ? after.length : 0)));
 };
 Ops.combineSelection = (mask, mode, label) => Ops.setSelection(P.combine(doc().selection.mask, mask, mode), label);
 Ops.deselect = () => { if (doc().selection.active) Ops.setSelection(null, 'Deselect'); };
@@ -125,16 +124,31 @@ Ops.copySelectionToLayer = function (cut) {
 };
 
 /* ───────────── clipboard ───────────── */
+const isEmpty = c => !P.bounds(P.alphaToMask(U.read(c)), c.width, c.height);
+Ops.isEmptyCanvas = isEmpty;
+function toSystemClipboard(c) {
+  if (navigator.clipboard && window.ClipboardItem) {
+    U.toBlob(c, 'image/png').then(b => navigator.clipboard.write([new ClipboardItem({ 'image/png': b })])).catch(() => { /* permission denied → internal clipboard still works */ });
+  }
+}
 Ops.copy = function (merged, cut) {
-  const d = doc(), l = d.active; if (!l && !merged) return;
+  const d = doc(), l = d.active, f = app().floating;
+  if (f) { // a floating selection copies/cuts itself, as in MS Paint
+    const c = f.render();
+    app().clipboard = { canvas: c, x: f.x, y: f.y }; app().clipboardFresh = true; toSystemClipboard(c);
+    if (cut) PP.app.tools.current.drop();
+    toast(cut ? 'Cut' : 'Copied'); return;
+  }
+  if (!l && !merged) return;
   let piece;
   if (d.selection.active) piece = extract(l, merged);
   else { const src = merged ? PP.app.view.flattened() : U.clone(l.source()); piece = { canvas: src, x: merged ? 0 : l.x, y: merged ? 0 : l.y }; }
   if (!piece) return;
-  app().clipboard = piece; app().clipboardFresh = true;
-  if (navigator.clipboard && window.ClipboardItem) {
-    U.toBlob(piece.canvas, 'image/png').then(b => navigator.clipboard.write([new ClipboardItem({ 'image/png': b })])).catch(() => { /* permission denied → internal clipboard still works */ });
+  if (!merged && !cut && isEmpty(piece.canvas)) { // nothing on the active layer there: copy what you see, like MS Paint
+    piece = d.selection.active ? extract(l, true) : { canvas: PP.app.view.flattened(), x: 0, y: 0 };
+    merged = true;
   }
+  app().clipboard = piece; app().clipboardFresh = true; toSystemClipboard(piece.canvas);
   if (cut) { if (d.selection.active) Ops.removeByMask(false); else Ops.clearLayer(); }
   toast(cut ? 'Cut' : merged ? 'Copied merged' : 'Copied');
 };
@@ -144,7 +158,54 @@ Ops.pasteCanvas = function (canvas, x, y, name = 'Pasted') {
   const nl = new M.Layer({ name, canvas: U.clone(canvas), x, y });
   M.docCommand('Paste', () => { const a = d.active; d.layers.splice(a ? d.index(a) + 1 : d.layers.length, 0, nl); d.activeId = nl.id; });
 };
-Ops.pasteInternal = () => { const c = app().clipboard; if (c) { Ops.pasteCanvas(c.canvas, c.x, c.y); return true; } return false; };
+/** MS Paint style paste: a floating selection on the active layer, slightly offset from where it was copied
+ * (or at the top-left of the visible area when that spot is off screen / the image came from outside). */
+Ops.pasteFloating = function (canvas, x, y) {
+  PP.Tools.settleFloat();
+  const d = doc(), a = d.active, v = PP.app.view, sr = v.stage.getBoundingClientRect(), p0 = v.toDoc(sr.left, sr.top), p1 = v.toDoc(sr.right, sr.bottom);
+  const vis = U.intersect(U.snap({ x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y }), { x: 0, y: 0, w: d.width, h: d.height }) || { x: 0, y: 0, w: d.width, h: d.height };
+  const off = Math.max(1, Math.round(24 / v.zoom)); // ~24 screen px, so the copy is visibly off the original
+  let px = x == null ? null : x + off, py = y == null ? null : y + off;
+  if (px == null || !U.intersect({ x: px, y: py, w: canvas.width, h: canvas.height }, vis)) { px = vis.x; py = vis.y; }
+  // The paste is a real layer straight away (visible in Layers), with move/resize handles until placed.
+  const name = 'Pasted ' + (d.layers.filter(l => /^Pasted \d+$/.test(l.name)).length + 1);
+  const nl = new M.Layer({ name, canvas: U.clone(canvas), x: px, y: py });
+  M.docCommand('Paste', dd => { dd.layers.splice(a ? dd.index(a) + 1 : dd.layers.length, 0, nl); dd.activeId = nl.id; });
+  PP.Tools.startFloat({ src: nl.canvas, x: px, y: py, layer: nl, ownLayer: true, hist: PP.app.history.index, label: 'Paste' });
+  toast(`New layer “${name}” — drag to move, handles resize, Enter or click outside to place`);
+};
+/** Bring an image into the active layer as a floating selection (move/resize, then placed into that layer).
+ * Images larger than the canvas start scaled down to fit; the full-resolution pixels are kept until placed. */
+Ops.importIntoLayer = function (canvas) {
+  PP.Tools.settleFloat();
+  const d = doc(), l = Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+  const k = Math.min(1, d.width / canvas.width, d.height / canvas.height);
+  const w = Math.max(1, Math.round(canvas.width * k)), h = Math.max(1, Math.round(canvas.height * k));
+  PP.Tools.startFloat({ src: canvas, x: Math.round((d.width - w) / 2), y: Math.round((d.height - h) / 2), w, h, layer: l, edit: null, label: 'Import Image' });
+  toast(`Image added to “${l.name}” — drag to move, handles resize, Enter or click outside to place`);
+};
+Ops.pasteInternal = (asLayer) => { const c = app().clipboard; if (c) { (asLayer ? Ops.pasteCanvas : Ops.pasteFloating)(c.canvas, c.x, c.y); return true; } return false; };
+
+/** Lift the selected pixels into a floating selection. copy=false leaves a hole (background colour on the
+ * Background layer, transparency elsewhere); copy=true leaves the original in place. */
+Ops.liftSelection = function (copy) {
+  const d = doc(), s = d.selection; if (!s.active) return false;
+  const l = Ops.editableLayer(); if (!l) return false;
+  const piece = extract(l, false); if (!piece) return false;
+  let edit = null;
+  if (!copy) {
+    const m = l.selMask(s), bb = P.bounds(m, l.w, l.h);
+    if (bb) {
+      edit = new M.PixelEdit(l); edit.save(bb);
+      const img = U.read(l.canvas, bb.x, bb.y, bb.w, bb.h), sub = new Uint8Array(bb.w * bb.h);
+      for (let y = 0; y < bb.h; y++) sub.set(m.subarray((bb.y + y) * l.w + bb.x, (bb.y + y) * l.w + bb.x + bb.w), y * bb.w);
+      if (l === d.layers[0] && l.name === 'Background') P.fillThroughMask(img.data, sub, U.hexToRgb(app().colors.bg), 1);
+      else P.applyMaskToAlpha(img.data, sub, false);
+      U.write(l.canvas, img, bb.x, bb.y); l.touch(bb);
+    }
+  }
+  return PP.Tools.startFloat({ src: piece.canvas, x: piece.x, y: piece.y, layer: l, edit, label: copy ? 'Duplicate Selection' : 'Move Selection' });
+};
 
 Ops.clearLayer = function () {
   const l = Ops.editableLayer(); if (!l) return;
@@ -181,6 +242,7 @@ const cmd = M.docCommand;
 Ops.newLayer = function (name) {
   const d = doc(), a = d.active, l = new M.Layer({ name: name || `Layer ${d.layers.length + 1}`, w: d.width, h: d.height });
   cmd('New Layer', () => { d.layers.splice(a ? d.index(a) + 1 : d.layers.length, 0, l); d.activeId = l.id; });
+  toast(`Empty “${l.name}” added — Layer ▸ Import Image into Layer… (or the picture button below the layers) to fill it`);
   return l;
 };
 Ops.duplicateLayer = function () {
@@ -205,8 +267,7 @@ Ops.setLayerProps = function (layer, props, label = 'Layer Properties') {
 Ops.recordMove = function (l, x0, y0) {
   const dx = l.x - x0, dy = l.y - y0; if (!dx && !dy) return;
   if (l.text) { l.text.ax += dx; l.text.ay += dy; }
-  const set = k => { l.x = x0 + dx * k; l.y = y0 + dy * k; if (l.text) { l.text.ax += (k ? dx : -dx); l.text.ay += (k ? dy : -dy); } bus.emit('pixels', { rect: null }); bus.emit('layers'); };
-  H().push({ label: 'Move', undo: () => set(0), redo: () => set(1) });
+  H().push(M.entry('move', 'Move', { layer: l, x0, y0, dx, dy }));
 };
 Ops.rasterize = function (l) {
   if (l.type !== 'text') return;
@@ -223,7 +284,7 @@ Ops.mergeDown = function () {
   cmd('Merge Down', () => {
     const r = U.union(b.bounds, a.bounds), c = U.canvas(r.w, r.h), g = c.getContext('2d');
     if (b.visible) { g.globalAlpha = b.opacity; g.drawImage(bakeLayer(b), b.x - r.x, b.y - r.y); }
-    if (a.visible) { g.globalAlpha = a.opacity; g.globalCompositeOperation = M.BLEND[a.blend]; g.drawImage(bakeLayer(a), a.x - r.x, a.y - r.y); }
+    if (a.visible) { g.globalAlpha = a.opacity; g.drawImage(bakeLayer(a), a.x - r.x, a.y - r.y); }
     Object.assign(b, { canvas: c, x: r.x, y: r.y, mask: null, opacity: 1, blend: 'normal', type: 'raster', text: null }); b.rev++;
     d.layers.splice(i, 1); d.activeId = b.id;
   });
@@ -273,9 +334,9 @@ Ops.addTextLayer = function (x, y) {
 };
 Ops.updateText = function (l, before, after) {
   if (JSON.stringify(before) === JSON.stringify(after)) return;
-  const set = t => { l.text = Object.assign({}, t); M.renderText(l); l.name = (t.text.split('\n')[0] || 'Text').slice(0, 32); bus.emit('layers'); };
-  set(after);
-  H().push({ label: 'Edit Text', bytes: 0, undo: () => set(before), redo: () => set(after) });
+  const e = M.entry('text', 'Edit Text', { layer: l, before: Object.assign({}, before), after: Object.assign({}, after) });
+  e.redo();
+  H().push(e);
 };
 
 /* ───────────── geometry ───────────── */
@@ -299,7 +360,8 @@ function resample(src, w, h, smooth) {
 Ops.resample = resample;
 function textToRaster(l) { if (l.type === 'text') { l.type = 'raster'; l.text = null; } }
 
-Ops.crop = function (r, deletePixels = true) {
+/** shape: crop to a non-rectangular selection — pixels outside it become transparent on every raster layer. */
+Ops.crop = function (r, deletePixels = true, shape = false) {
   r = U.snap(r);
   if (!U.validSize(r.w, r.h)) { toast('Invalid crop size', 'error'); return; }
   const d = doc();
@@ -310,16 +372,38 @@ Ops.crop = function (r, deletePixels = true) {
         if (!i) { l.canvas = U.canvas(1, 1); l.mask = l.mask && U.canvas(1, 1); l.x = 0; l.y = 0; continue; }
         const cut = c => { const n = U.canvas(i.w, i.h); n.getContext('2d').drawImage(c, l.x - i.x, l.y - i.y); return n; };
         l.canvas = cut(l.canvas); if (l.mask) l.mask = cut(l.mask);
+        if (shape) { const img = U.read(l.canvas); P.applyMaskToAlpha(img.data, d.selection.maskForRect(i.x, i.y, i.w, i.h), true); U.write(l.canvas, img); }
         l.x = i.x - r.x; l.y = i.y - r.y;
       } else { l.x -= r.x; l.y -= r.y; if (l.text) { l.text.ax -= r.x; l.text.ay -= r.y; } }
       l.rev++;
     }
-    const old = d.selection.mask ? d.selection.maskForRect(r.x, r.y, r.w, r.h) : null;
+    const old = d.selection.mask && !shape ? d.selection.maskForRect(r.x, r.y, r.w, r.h) : null;
     d.width = r.w; d.height = r.h; d.selection.w = r.w; d.selection.h = r.h; d.selection.set(old);
   });
   PP.app.view.fit();
 };
-Ops.cropToSelection = () => { const b = doc().selection.bounds; if (!b) { toast('Make a selection first', 'warn'); return; } Ops.crop(b, true); };
+/** Crop only the active layer to the selection (any shape): everything outside it is removed from that
+ * layer; the canvas size and all other layers stay as they are. One undo step, selection cleared. */
+Ops.cropLayer = function () {
+  PP.Tools.settleFloat();
+  const d = doc(), s = d.selection;
+  if (!s.active) { toast('Make a selection first (marquee, Smart Select, lasso…)', 'warn'); return; }
+  const l = Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+  const piece = extract(l, false);
+  if (!piece || !P.bounds(P.alphaToMask(U.read(piece.canvas)), piece.canvas.width, piece.canvas.height)) { toast(`Nothing of “${l.name}” is inside the selection`, 'warn'); return; }
+  cmd('Crop Layer', () => { l.canvas = piece.canvas; l.mask = null; l.x = piece.x; l.y = piece.y; l.rev++; d.selection.set(null); });
+  toast(`Cropped “${l.name}” — other layers unchanged`);
+};
+/** Crop the whole canvas (all layers) to the selection (any shape: marquee, ellipse, lasso, smart select…) or to a floating paste. */
+Ops.cropToSelection = function () {
+  const f = app().floating;
+  if (f) { const r = { x: f.x, y: f.y, w: f.w, h: f.h }; PP.Tools.settleFloat(); Ops.crop(r, true); return; }
+  const s = doc().selection, b = s.bounds;
+  if (!b) { toast('Make a selection first (marquee, Smart Select, lasso…)', 'warn'); return; }
+  let rect = true;
+  for (let y = b.y; y < b.y + b.h && rect; y++) for (let x = b.x; x < b.x + b.w; x++) if (s.mask[y * s.w + x] !== 255) { rect = false; break; }
+  Ops.crop(b, true, !rect);
+};
 Ops.trim = function () { // crop to non-transparent pixels of the composite
   const b = P.bounds(P.alphaToMask(U.read(PP.app.view.flattened())), doc().width, doc().height);
   if (!b) { toast('Image is fully transparent', 'warn'); return; }
@@ -394,17 +478,56 @@ Ops.flipLayer = function (horizontal) {
     l.canvas = redraw(l.canvas, l.w, l.h, t, false); if (l.mask) l.mask = redraw(l.mask, l.mask.width, l.mask.height, t, false); l.rev++;
   });
 };
-Ops.applyTransform = function (l, m) {
+Ops.applyTransform = function (l, m, label = 'Free Transform') {
   const pts = [[0, 0], [l.w, 0], [l.w, l.h], [0, l.h]].map(([x, y]) => ({ x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f }));
   const x0 = Math.floor(Math.min(...pts.map(p => p.x))), y0 = Math.floor(Math.min(...pts.map(p => p.y)));
   const w = Math.ceil(Math.max(...pts.map(p => p.x))) - x0, h = Math.ceil(Math.max(...pts.map(p => p.y))) - y0;
   if (!U.validSize(w, h)) { toast('Transformed layer would be too large', 'error'); bus.emit('pixels', { rect: null }); return; }
   const t = g => g.setTransform(m.a, m.b, m.c, m.d, m.e - x0, m.f - y0);
-  cmd('Free Transform', () => {
+  cmd(label, () => {
     l.canvas = redraw(l.canvas, w, h, t); if (l.mask) l.mask = redraw(l.mask, w, h, t);
     l.x = x0; l.y = y0; l.rev++;
   });
 };
+
+/* ── per-layer transform panel: rotate, resize, position ── */
+/** Rotate the active layer about its centre. Multiples of 90° are exact (no resampling blur). */
+Ops.rotateLayer = function (deg) {
+  deg = ((+deg % 360) + 360) % 360; if (!deg) return;
+  const l = Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+  const r = (deg * Math.PI) / 180, right = deg % 90 === 0;
+  const c = right ? Math.round(Math.cos(r)) : Math.cos(r), n = right ? Math.round(Math.sin(r)) : Math.sin(r);
+  const cx = l.x + l.w / 2, cy = l.y + l.h / 2, m = { a: c, b: n, c: -n, d: c };
+  m.e = cx - (m.a * l.w) / 2 - (m.c * l.h) / 2; m.f = cy - (m.b * l.w) / 2 - (m.d * l.h) / 2;
+  if (right) { // land the corners on whole pixels so a 90° turn is a pure pixel shuffle
+    const xs = [0, l.w].flatMap(x => [0, l.h].map(y => m.a * x + m.c * y + m.e)), ys = [0, l.w].flatMap(x => [0, l.h].map(y => m.b * x + m.d * y + m.f));
+    m.e += Math.round(Math.min(...xs)) - Math.min(...xs); m.f += Math.round(Math.min(...ys)) - Math.min(...ys);
+  }
+  Ops.applyTransform(l, m, `Rotate Layer ${deg > 180 ? deg - 360 : deg}°`);
+};
+/** Resize the active layer to w × h px, keeping its top-left corner (high-quality resampling). */
+Ops.resizeLayer = function (w, h, label = 'Resize Layer') {
+  const l = Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+  w = Math.round(w); h = Math.round(h);
+  if (!U.validSize(w, h)) { toast('Invalid layer size', 'warn'); return; }
+  if (w === l.w && h === l.h) return;
+  cmd(label, () => { l.canvas = resample(l.canvas, w, h, true); if (l.mask) l.mask = resample(l.mask, w, h, true); l.rev++; });
+};
+/** Scale the active layer to fit inside the canvas (keeping proportions) and centre it. */
+Ops.fitLayer = function () {
+  const d = doc(), l = Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+  const k = Math.min(d.width / l.w, d.height / l.h), w = Math.max(1, Math.round(l.w * k)), h = Math.max(1, Math.round(l.h * k));
+  cmd('Fit Layer to Canvas', () => {
+    if (w !== l.w || h !== l.h) { l.canvas = resample(l.canvas, w, h, true); if (l.mask) l.mask = resample(l.mask, w, h, true); }
+    l.x = Math.round((d.width - w) / 2); l.y = Math.round((d.height - h) / 2); l.rev++;
+  });
+};
+Ops.moveLayerTo = function (x, y) {
+  const l = Ops.editableLayer({ any: true }); if (!l || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  const x0 = l.x, y0 = l.y; l.x = Math.round(x); l.y = Math.round(y);
+  Ops.recordMove(l, x0, y0); bus.emit('pixels', { rect: null }); bus.emit('layers');
+};
+Ops.centerLayer = function () { const d = doc(), l = d.active; if (l) Ops.moveLayerTo((d.width - l.w) / 2, (d.height - l.h) / 2); };
 
 /* ───────────── filters & adjustments (live preview sessions) ─────────────
  * Preview runs at full resolution in a worker (cancellable, latest wins), limited to the

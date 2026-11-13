@@ -9,6 +9,9 @@ const DEFAULT_OPTS = {
   wand: { tolerance: 32, contiguous: true, diagonal: false, merged: true },
   range: { tolerance: 32, fuzziness: 24 },
   magnetic: { width: 10, contrast: 20, frequency: 8 },
+  smart: { radius: 14, contrast: 15, shapes: true },
+  quick: { mode: 'add', size: 30, tolerance: 24 },
+  skin: { mode: 'smooth', size: 40, strength: 70, radius: 6, detail: 40 },
   maskBrush: { mode: 'reveal' },
   fill: { tolerance: 32, opacity: 100, contiguous: true, diagonal: false, merged: false, antialias: true },
   picker: { size: 1, merged: true },
@@ -17,7 +20,8 @@ const DEFAULT_OPTS = {
   shape: { stroke: true, fill: false, width: 4, radius: 16, antialias: true },
   text: { font: 'system-ui, sans-serif', size: 48, weight: 400, italic: false, align: 'left' },
   export: { format: 'png', quality: 92 },
-  xf: { sx: 100, sy: 100, rot: 0 }
+  xf: { sx: 100, sy: 100, rot: 0 },
+  paste: { x: 0, y: 0, w: 1, h: 1, ratio: false, transparent: false }
 };
 
 /** Merge saved prefs into defaults: only known keys, only matching types (untrusted storage). */
@@ -52,6 +56,17 @@ PP.App = {
     IO.session.set('doc', d.id);
     IO.autosave();
   },
+  /** Drop the current document without saving (its autosave is discarded by the caller). */
+  closeDocument() {
+    if (app.tools) app.tools.cancel();
+    app.doc = null; app.dirty = false; app.clipboard = null; app.target = 'pixels';
+    app.history.clear('Open');
+    document.body.classList.remove('has-doc');
+    document.title = 'PixelPaint';
+    IO.session.set('doc', null);
+    bus.emit('docsize'); bus.emit('layers'); bus.emit('selection', null); bus.emit('pixels', { rect: null });
+    PP.UI.status({ save: ' ', sel: '' }); PP.UI.refreshStatus();
+  },
   newDocument(w, h, bg = 'white', name = 'Untitled') {
     const d = new M.Doc({ name, width: w, height: h });
     const l = new M.Layer({ name: bg === 'transparent' ? 'Layer 1' : 'Background', w, h });
@@ -67,6 +82,7 @@ app.view = new PP.View(document.getElementById('stage'));
 app.view.bg = prefs.bg === 'checker' || hex(prefs.bg) ? prefs.bg : 'checker';
 app.view.showGrid = !!prefs.grid;
 app.tools = new PP.Tools.ToolManager(app.view);
+app.opts.select.mode = 'replace'; // a remembered Add/Subtract made later marquees look broken
 PP.UI.build();
 app.tools.select(PP.Tools.list.some(t => t.id === prefs.tool && !t.hidden) ? prefs.tool : 'brush');
 IO.bindInputs();
@@ -79,6 +95,12 @@ bus.on('history', e => {
   if (!persistAsked) { persistAsked = true; IO.requestPersist(); }
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden && app.dirty) { app.dirty = false; IO.saveNow(); } });
+// Reload / close / navigate away with an open image: ask first (browsers show their own generic wording).
+window.addEventListener('beforeunload', e => {
+  if (!app.doc || !(app.history.stack.length || app.dirty)) return;
+  if (app.dirty) IO.saveNow(); // start saving the latest steps in case the user confirms
+  e.preventDefault(); e.returnValue = '';
+});
 window.addEventListener('pagehide', () => { if (app.dirty) { app.dirty = false; IO.saveNow(); } });
 
 window.addEventListener('error', e => { console.error(e.error || e.message); PP.UI.toast('Unexpected error: ' + (e.message || 'see console'), 'error'); });

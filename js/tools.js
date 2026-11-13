@@ -40,10 +40,12 @@ function tip(d, hardness, rgb) {
 }
 
 function selMode(e) {
+  if (e.button === 2) return 'subtract';
   if (e.shift && e.alt) return 'intersect';
   if (e.shift) return 'add';
   if (e.alt) return 'subtract';
-  return O().select.mode;
+  const m = O().select.mode; // subtracting from / intersecting with nothing would silently do nothing
+  return (m === 'subtract' || m === 'intersect') && !doc().selection.active ? 'replace' : m;
 }
 
 /** Rasterize document-space geometry into a full-document mask, drawing only inside bbox. */
@@ -318,8 +320,38 @@ const def = t => (tools.push(t), t);
 def({
   id: 'move', name: 'Move', key: 'v', cursor: 'move',
   icon: 'M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3',
-  options: [{ type: 'note', text: 'Drag to move the active layer · arrows nudge' }],
-  down(e) { const l = PP.Ops.editableLayer({ any: true }); if (!l) return; this.s = { l, x0: l.x, y0: l.y, px: e.x, py: e.y }; },
+  options: [{ type: 'note', text: 'Drag to move the selected layer · squares resize · round knob rotates · arrows nudge' }],
+  init() { bus.on('layers', () => PP.app.view && PP.app.view.requestOverlay()); },
+  /** Box handles of the selected layer (doc coords) — only for an unlocked, visible layer. */
+  box() {
+    const d = doc(), l = d && d.active; if (!l || l.locked || !l.visible || app().floating) return null;
+    const hs = [];
+    for (const hy of [-1, 0, 1]) for (const hx of [-1, 0, 1]) if (hx || hy) hs.push({ hx, hy, p: { x: l.x + ((hx + 1) / 2) * l.w, y: l.y + ((hy + 1) / 2) * l.h } });
+    const top = { x: l.x + l.w / 2, y: l.y };
+    return { l, hs, top, knob: rotKnob(view(), top, { x: l.x + l.w / 2, y: l.y + l.h / 2 }) };
+  },
+  boxHit(e) {
+    const B = this.box(); if (!B) return null;
+    const v = view(), tol = (8 * v.dpr) / v.scale;
+    if (Math.hypot(B.knob.x - e.x, B.knob.y - e.y) < tol * 1.2) return 'rotate';
+    const h = B.hs.find(h => Math.hypot(h.p.x - e.x, h.p.y - e.y) < tol);
+    return h ? h : null;
+  },
+  hoverMove(e) { const h = this.boxHit(e); view().over.style.cursor = !h ? 'move' : h === 'rotate' ? ROT_CURSOR : RESIZE_CURSOR[h.hx + ',' + h.hy]; },
+  down(e) {
+    if (this.boxHit(e)) { // a handle or the knob: continue this same drag as a live transform
+      const tm = app().tools; tm.select('transform');
+      if (tm.current.id === 'transform') { tm.active = true; tm.current.down(e); }
+      return;
+    }
+    const l = PP.Ops.editableLayer({ any: true }); if (!l) return; this.s = { l, x0: l.x, y0: l.y, px: e.x, py: e.y };
+  },
+  overlay(g, v) {
+    const B = this.box(); if (!B || this.s) return;
+    strokeDocRect(g, v, { x: B.l.x, y: B.l.y, w: B.l.w, h: B.l.h }, true);
+    drawKnob(g, v, B.top, B.knob);
+    for (const h of B.hs) handle(g, v, h.p.x, h.p.y);
+  },
   move(e) {
     if (!this.s) return;
     let dx = Math.round(e.x - this.s.px), dy = Math.round(e.y - this.s.py);
@@ -349,18 +381,24 @@ def({
   up() { this.p = null; }, cancel() { this.p = null; }
 });
 
-def({
-  id: 'zoom', name: 'Zoom', key: 'z', cursor: 'zoom-in',
-  icon: 'M10.5 3a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15M16 16l5 5M10.5 7v7M7 10.5h7',
-  options: [{ type: 'note', text: 'Click to zoom in · Alt+click to zoom out' }, { type: 'button', label: 'Fit', action: () => view().fit() }, { type: 'button', label: '100%', action: () => view().actual() }],
-  down(e) { view().step(e.alt ? -1 : 1, e.clientX, e.clientY); }
-});
+
+/** MS Paint style: dragging inside the selection lifts its pixels into a floating selection
+ * (Ctrl+drag lifts a copy and leaves the original). Returns true when the click was consumed. */
+function liftAt(e) {
+  const s = doc().selection;
+  if (e.shift || e.alt || e.button === 2 || O().select.mode !== 'replace' || !s.active) return false;
+  const x = Math.floor(e.x), y = Math.floor(e.y);
+  if (x < 0 || y < 0 || x >= s.w || y >= s.h || s.mask[y * s.w + x] < 128) return false;
+  const tm = app().tools;
+  if (PP.Ops.liftSelection(e.ctrl) && tm.current.id === 'paste') { tm.active = true; tm.current.down(e); }
+  return true;
+}
 
 /* Rectangular / elliptical marquee */
 function marquee(id, name, key, icon, ellipse) {
   return def({
-    id, name, key, cursor: 'crosshair', icon, options: selOpts(),
-    down(e) { this.a = { x: e.x, y: e.y }; this.mode = selMode(e); this.r = null; },
+    id, name, key, cursor: 'crosshair', icon, rightClick: true, options: selOpts([{ type: 'note', text: 'Shift adds · right-drag subtracts · drag inside a selection to move it (Ctrl duplicates)' }]),
+    down(e) { if (liftAt(e)) return; this.a = { x: e.x, y: e.y }; this.mode = selMode(e); this.r = null; },
     move(e) { if (this.a) { this.r = dragRect(this.a, e, e, true); view().requestOverlay(); } },
     up() {
       if (!this.a) return;
@@ -391,10 +429,10 @@ function finishPolygonSelection(pts, mode, label) {
 
 /* Freehand lasso — records the user's exact pointer path (coalesced events, sub-pixel). */
 def({
-  id: 'lasso', name: 'Lasso', key: 'l', cursor: 'crosshair',
+  id: 'lasso', name: 'Lasso', key: 'l', cursor: 'crosshair', rightClick: true,
   icon: 'M7 17c-3-2-4-6 0-9s12-3 13 2-6 7-10 6M7 17c-1 2 0 4 2 4',
   options: selOpts([{ key: 'select.smoothing', label: 'Smoothing', type: 'range', min: 0, max: 5, step: 0.1, unit: 'px' }]),
-  down(e) { this.pts = [{ x: e.x, y: e.y }]; this.mode = selMode(e); },
+  down(e) { if (liftAt(e)) return; this.pts = [{ x: e.x, y: e.y }]; this.mode = selMode(e); },
   move(e) {
     if (!this.pts) return;
     const l = this.pts[this.pts.length - 1];
@@ -407,6 +445,228 @@ def({
   },
   cancel() { this.pts = null; view().requestOverlay(); },
   overlay(g, v) { if (this.pts) strokeDocPath(g, v, this.pts, false); }
+});
+
+/** Switch to the plain selection brush in add ('reveal') or remove ('hide') mode — manual fine-tuning. */
+function selBrush(mode) {
+  O().maskBrush.mode = mode; PP.IO.savePrefs();
+  const tm = app().tools;
+  if (tm.current.id === 'mask-brush') bus.emit('tool', tm.current); else tm.select('mask-brush');
+}
+const brushJump = [{ type: 'button', label: '+ Add brush', action: () => selBrush('reveal') }, { type: 'button', label: '− Remove brush', action: () => selBrush('hide') }];
+
+/* Smart select — draw roughly around an object; the outline snaps to the strongest nearby edges
+ * (Sobel gradient searched along the outline's normals, outliers median-filtered). When the snapped
+ * contour is well described by an ellipse/circle, a clean least-squares ellipse is used instead.
+ * Classical image processing only: the user's rough outline is always the starting point. */
+function resampleClosed(pts, step) {
+  const out = [], n = pts.length;
+  let carry = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], L = Math.hypot(b.x - a.x, b.y - a.y);
+    let t = carry;
+    while (t < L) { const k = t / L; out.push({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }); t += step; }
+    carry = t - L;
+  }
+  return out;
+}
+/** Move each point along its normal (±R) to the strongest edge; points with no edge keep their place. */
+function snapToEdges(pts, R, thr) {
+  const d = doc(), bb = bboxOf(pts);
+  const r = U.intersect(U.snap({ x: bb.x - R - 2, y: bb.y - R - 2, w: bb.w + 2 * R + 4, h: bb.h + 2 * R + 4 }), { x: 0, y: 0, w: d.width, h: d.height });
+  if (!r) return { pts, hits: 0 };
+  const g = P.sobelMagnitude(U.read(view().flattened(), r.x, r.y, r.w, r.h)), n = pts.length, off = new Float32Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], a = pts[(i - 1 + n) % n], b = pts[(i + 1) % n];
+    let nx = -(b.y - a.y), ny = b.x - a.x; const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
+    let best = -1, bt = NaN;
+    for (let t = -R; t <= R; t += 0.5) {
+      const x = Math.round(p.x + nx * t) - r.x, y = Math.round(p.y + ny * t) - r.y;
+      if (x < 0 || y < 0 || x >= r.w || y >= r.h) continue;
+      const v = g[y * r.w + x]; if (v < thr) continue;
+      const s = v * (1 - (0.7 * Math.abs(t)) / R);
+      if (s > best) { best = s; bt = t; }
+    }
+    off[i] = bt; p.nx = nx; p.ny = ny;
+  }
+  // robust smoothing: median of valid neighbours (window 7), then a light average
+  const med = new Float32Array(n), win = [];
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    win.length = 0;
+    for (let k = -3; k <= 3; k++) { const v = off[(i + k + n) % n]; if (v === v) win.push(v); }
+    win.sort((x, y) => x - y);
+    med[i] = win.length ? win[win.length >> 1] : 0;
+    if (off[i] === off[i]) hits++;
+  }
+  const out = pts.map((p, i) => { const t = (med[(i - 1 + n) % n] + med[i] + med[(i + 1) % n]) / 3; return { x: p.x + p.nx * t, y: p.y + p.ny * t, ok: off[i] === off[i] }; });
+  return { pts: out, hits: hits / n };
+}
+/** Least-squares conic Ax²+Bxy+Cy²+Dx+Ey=1 → ellipse {cx,cy,a,b,rot,err} or null. */
+function fitEllipse(pts) {
+  if (pts.length < 8) return null;
+  let mx = 0, my = 0; for (const p of pts) { mx += p.x; my += p.y; } mx /= pts.length; my /= pts.length;
+  let sc = 0; for (const p of pts) sc += Math.hypot(p.x - mx, p.y - my); sc = sc / pts.length || 1;
+  const M = Array.from({ length: 5 }, () => new Float64Array(6));
+  for (const p of pts) {
+    const x = (p.x - mx) / sc, y = (p.y - my) / sc, row = [x * x, x * y, y * y, x, y];
+    for (let i = 0; i < 5; i++) { for (let j = 0; j < 5; j++) M[i][j] += row[i] * row[j]; M[i][5] += row[i]; }
+  }
+  for (let c = 0; c < 5; c++) { // Gaussian elimination, partial pivoting
+    let piv = c; for (let r = c + 1; r < 5; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+    if (Math.abs(M[piv][c]) < 1e-12) return null;
+    [M[c], M[piv]] = [M[piv], M[c]];
+    for (let r = 0; r < 5; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k < 6; k++) M[r][k] -= f * M[c][k]; }
+  }
+  const [A, B, C, D, E] = M.map((r, i) => r[5] / r[i]), F = -1, den = B * B - 4 * A * C;
+  if (den >= 0) return null; // not an ellipse
+  const x0 = (2 * C * D - B * E) / den, y0 = (2 * A * E - B * D) / den;
+  const F0 = A * x0 * x0 + B * x0 * y0 + C * y0 * y0 + D * x0 + E * y0 + F;
+  const rot = 0.5 * Math.atan2(B, A - C), c = Math.cos(rot), s = Math.sin(rot);
+  const lu = A * c * c + B * s * c + C * s * s, lv = A * s * s - B * s * c + C * c * c;
+  if (-F0 / lu <= 0 || -F0 / lv <= 0) return null;
+  const e = { cx: x0 * sc + mx, cy: y0 * sc + my, a: Math.sqrt(-F0 / lu) * sc, b: Math.sqrt(-F0 / lv) * sc, rot };
+  let err = 0;
+  for (const p of pts) {
+    const dx = p.x - e.cx, dy = p.y - e.cy, u = dx * c + dy * s, v = -dx * s + dy * c;
+    err += Math.abs(Math.hypot(u / e.a, v / e.b) - 1);
+  }
+  e.err = err / pts.length;
+  return e;
+}
+const ellipsePts = (e, step) => {
+  const n = Math.max(24, Math.ceil((Math.PI * (e.a + e.b)) / step)), c = Math.cos(e.rot), s = Math.sin(e.rot), out = [];
+  for (let i = 0; i < n; i++) { const t = (i / n) * Math.PI * 2, u = e.a * Math.cos(t), v = e.b * Math.sin(t); out.push({ x: e.cx + u * c - v * s, y: e.cy + u * s + v * c }); }
+  return out;
+};
+
+def({
+  id: 'smart-select', name: 'Smart Select', key: null, cursor: 'crosshair', rightClick: true,
+  icon: 'M4 12a7 6 0 1 0 14 0a7 6 0 1 0-14 0M19 2v4M17 4h4M20 9v2M19 10h2',
+  options: selOpts([
+    { key: 'smart.radius', label: 'Snap distance', type: 'range', min: 3, max: 60, unit: 'px' },
+    { key: 'smart.contrast', label: 'Edge contrast', type: 'range', min: 1, max: 100, unit: '%' },
+    { key: 'smart.shapes', label: 'Snap to circle/ellipse', type: 'check' }, ...brushJump,
+    { type: 'note', text: 'Draw roughly around an object — it snaps to the edges · Shift adds · right-drag subtracts' }
+  ]),
+  down(e) { if (liftAt(e)) return; this.pts = [{ x: e.x, y: e.y }]; this.mode = selMode(e); },
+  move(e) {
+    if (!this.pts) return;
+    const l = this.pts[this.pts.length - 1];
+    if (Math.hypot(e.x - l.x, e.y - l.y) >= 0.5) { this.pts.push({ x: e.x, y: e.y }); view().requestOverlay(); }
+  },
+  up() {
+    if (!this.pts) return;
+    const raw = this.pts; this.pts = null; view().requestOverlay();
+    const bb = bboxOf(raw);
+    if (raw.length < 3 || bb.w < 3 || bb.h < 3) { if (this.mode === 'replace') PP.Ops.deselect(); return; }
+    const o = O().smart, R = o.radius, thr = (o.contrast / 100) * 400, step = Math.max(1, Math.min(3, Math.max(bb.w, bb.h) / 150));
+    PP.UI.busy(true, 'Finding edges…');
+    setTimeout(() => { // let the busy indicator paint first
+      try {
+        let snap = snapToEdges(resampleClosed(raw, step), R, thr), shape = null;
+        if (o.shapes && snap.hits > 0.3) {
+          let el = fitEllipse(snap.pts.filter(p => p.ok));
+          if (el && el.err < 0.08) { // refine once more from the clean ellipse with a tighter search
+            const again = snapToEdges(ellipsePts(el, step), Math.max(3, R / 2), thr), el2 = fitEllipse(again.pts.filter(p => p.ok));
+            if (el2 && el2.err < el.err * 1.5) el = el2;
+          }
+          if (el && el.err < 0.05 && el.a > 2 && el.b > 2) shape = el;
+        }
+        if (shape) {
+          const r = Math.max(shape.a, shape.b);
+          const mask = rasterMask({ x: shape.cx - r, y: shape.cy - r, w: 2 * r, h: 2 * r }, g => { g.beginPath(); g.ellipse(shape.cx, shape.cy, shape.a, shape.b, shape.rot, 0, Math.PI * 2); g.fill(); }, O().select.antialias);
+          commitShapeSelection(mask, this.mode, 'Smart Select');
+          toast(Math.abs(shape.a - shape.b) < 0.03 * Math.max(shape.a, shape.b) ? 'Snapped to a circle' : 'Snapped to an ellipse');
+        } else {
+          finishPolygonSelection(snap.pts, this.mode, 'Smart Select');
+          toast(snap.hits < 0.15 ? 'No clear edges found — kept your outline (try lower Edge contrast)' : 'Snapped to edges');
+        }
+      } finally { PP.UI.busy(false); }
+    }, 16);
+  },
+  cancel() { this.pts = null; view().requestOverlay(); },
+  overlay(g, v) { if (this.pts) strokeDocPath(g, v, this.pts, true); }
+});
+
+/* Quick select brush — paint over an object: everything under the brush is selected and the selection
+ * grows outward (up to 2× the brush radius) into neighbouring pixels of similar colour, stopping at
+ * colour edges. Left = add, right-drag / Alt = subtract (or the Mode option, for touch). */
+def({
+  id: 'quick-select', name: 'Quick Select Brush', key: null, cursor: 'none', rightClick: true,
+  icon: 'M4 20c2.5 0 4-1.5 4-3.5a2 2 0 0 0-4 0M8 15l9.5-9.5a2 2 0 0 0-3-3L5 12M14 20h1M17 18h1M19 15v1',
+  options: [
+    { key: 'quick.mode', label: 'Mode', type: 'select', options: [['add', 'Add'], ['subtract', 'Subtract']] },
+    { key: 'quick.size', label: 'Size', type: 'range', min: 2, max: 400, unit: 'px', log: true },
+    { key: 'quick.tolerance', label: 'Tolerance', type: 'range', min: 1, max: 100 },
+    { key: 'select.feather', label: 'Feather', type: 'range', min: 0, max: 250, step: 0.5, unit: 'px' }, ...brushJump,
+    { type: 'note', text: 'Paint over the object · right-drag or Alt removes · blue = adding, red = removing' }
+  ],
+  init() { bus.on('pixels', () => { this.compRev = (this.compRev || 0) + 1; }); },
+  radius() { return O().quick.size / 2; },
+  image() { // composite pixels, cached until the image changes
+    if (!this.img || this.imgRev !== this.compRev || this.img.width !== doc().width || this.img.height !== doc().height) { this.img = U.read(view().flattened()); this.imgRev = this.compRev; }
+    return this.img;
+  },
+  down(e) {
+    const d = doc(), o = O().quick;
+    let sub = o.mode === 'subtract'; if (e.alt || e.button === 2) sub = !sub;
+    this.s = { sub, mask: new Uint8Array(d.width * d.height), tint: U.canvas(d.width, d.height), last: null, img: this.image() };
+    this.to(e);
+  },
+  move(e) { if (this.s) this.to(e); },
+  to(e) {
+    const S = this.s, r = Math.max(1, O().quick.size / 2), step = Math.max(1, r / 2);
+    if (!S.last) { this.dab(e.x, e.y, r); S.last = { x: e.x, y: e.y }; return; }
+    const L = S.last, dist = Math.hypot(e.x - L.x, e.y - L.y); if (dist < step) return;
+    for (let t = step; t <= dist; t += step) this.dab(L.x + ((e.x - L.x) * t) / dist, L.y + ((e.y - L.y) * t) / dist, r);
+    S.last = { x: e.x, y: e.y };
+  },
+  dab(x, y, r) {
+    const S = this.s, d = doc(), W = d.width, H = d.height, px = S.img.data, m = S.mask, tol = O().quick.tolerance;
+    const cx = Math.round(x), cy = Math.round(y), R = Math.ceil(r * 2);
+    const x0 = Math.max(0, cx - R), y0 = Math.max(0, cy - R), x1 = Math.min(W - 1, cx + R), y1 = Math.min(H - 1, cy + R);
+    if (x1 < x0 || y1 < y0) return;
+    // the brush disc is always taken; its mean colour bounds how far the growth may drift
+    const seeds = []; let n = 0, mr = 0, mg = 0, mb = 0;
+    for (let yy = Math.max(y0, cy - Math.ceil(r)); yy <= Math.min(y1, cy + Math.ceil(r)); yy++) for (let xx = Math.max(x0, cx - Math.ceil(r)); xx <= Math.min(x1, cx + Math.ceil(r)); xx++) {
+      if ((xx - x) * (xx - x) + (yy - y) * (yy - y) > r * r) continue;
+      const p = yy * W + xx, i = p * 4; mr += px[i]; mg += px[i + 1]; mb += px[i + 2]; n++;
+      if (m[p] !== 255) { m[p] = 255; seeds.push(p); } else seeds.push(p);
+    }
+    if (!n) return;
+    mr /= n; mg /= n; mb /= n;
+    const stepT = tol * tol, driftT = (2.5 * tol) * (2.5 * tol), R2 = R * R, stack = seeds;
+    const near = (a, b) => { const i = a * 4, j = b * 4, dr = px[i] - px[j], dg = px[i + 1] - px[j + 1], db = px[i + 2] - px[j + 2]; return dr * dr + dg * dg + db * db <= stepT; };
+    const drift = q => { const j = q * 4, dr = px[j] - mr, dg = px[j + 1] - mg, db = px[j + 2] - mb; return dr * dr + dg * dg + db * db <= driftT; };
+    const seen = new Set(seeds);
+    while (stack.length) {
+      const p = stack.pop(), X = p % W, Y = (p - X) / W;
+      for (const [q, qx, qy] of [[p - 1, X - 1, Y], [p + 1, X + 1, Y], [p - W, X, Y - 1], [p + W, X, Y + 1]]) {
+        if (qx < x0 || qx > x1 || qy < y0 || qy > y1 || seen.has(q)) continue;
+        if ((qx - cx) * (qx - cx) + (qy - cy) * (qy - cy) > R2) continue;
+        seen.add(q);
+        if (near(p, q) && drift(q)) { m[q] = 255; stack.push(q); }
+      }
+    }
+    // refresh the tint for this window
+    const ww = x1 - x0 + 1, hh = y1 - y0 + 1, img = new ImageData(ww, hh), t = img.data, c = S.sub ? [255, 60, 60] : [40, 140, 255];
+    for (let yy = 0; yy < hh; yy++) for (let xx = 0; xx < ww; xx++) if (m[(y0 + yy) * W + x0 + xx]) { const k = (yy * ww + xx) * 4; t[k] = c[0]; t[k + 1] = c[1]; t[k + 2] = c[2]; t[k + 3] = 255; }
+    U.write(S.tint, img, x0, y0);
+    view().requestOverlay();
+  },
+  up() {
+    const S = this.s; this.s = null; if (!S) return;
+    const d = doc();
+    if (!P.bounds(S.mask, d.width, d.height)) { view().requestOverlay(); return; }
+    commitShapeSelection(P.antialias(S.mask, d.width, d.height), S.sub ? 'subtract' : 'add', S.sub ? 'Quick Select −' : 'Quick Select +');
+  },
+  cancel() { this.s = null; view().requestOverlay(); },
+  overlay(g, v) {
+    if (!this.s) return;
+    v.docTransform(g); g.imageSmoothingEnabled = v.zoom < 1; g.globalAlpha = 0.45; g.drawImage(this.s.tint, 0, 0);
+    g.globalAlpha = 1; g.setTransform(1, 0, 0, 1, 0, 0);
+  }
 });
 
 /* Polygon lasso — click vertices; double-click, Enter, or click the first vertex to close. */
@@ -506,7 +766,7 @@ def({
 
 /* Magic wand */
 def({
-  id: 'wand', name: 'Magic Wand', key: 'w', cursor: 'crosshair',
+  id: 'wand', name: 'Magic Wand', key: 'w', cursor: 'crosshair', rightClick: true,
   icon: 'M4 20l12-12M14 6l2 2M18 2v4M16 4h4M20 9v2M19 10h2M11 3v2M10 4h2',
   options: selOpts([
     { key: 'wand.tolerance', label: 'Tolerance', type: 'range', min: 0, max: 255 },
@@ -533,7 +793,7 @@ def({
 
 /* Colour range — global colour match of the clicked colour. */
 def({
-  id: 'color-range', name: 'Color Range', key: null, cursor: 'crosshair',
+  id: 'color-range', name: 'Color Range', key: null, cursor: 'crosshair', rightClick: true,
   icon: 'M20 4a2.8 2.8 0 0 0-4 0l-3 3-1-1-2 2 6 6 2-2-1-1 3-3a2.8 2.8 0 0 0 0-4zM11 9l-7 7v4h4l7-7M3 3h4M5 1v4',
   options: selOpts([
     { key: 'range.tolerance', label: 'Tolerance', type: 'range', min: 0, max: 255 },
@@ -549,13 +809,14 @@ def({
 
 /* Mask brush — paint the selection directly (Reveal = add, Hide = remove). Quick-mask overlay shown. */
 def(paintTool({
-  id: 'mask-brush', name: 'Selection Brush', key: 'q', cursor: 'none',
+  id: 'mask-brush', name: 'Selection Brush', key: 'q', cursor: 'none', rightClick: true,
   icon: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 3v18M12 7l4-3M12 12l7-5M12 17l8-6',
-  options: [{ key: 'maskBrush.mode', label: 'Mode', type: 'select', options: [['reveal', 'Reveal (add)'], ['hide', 'Hide (remove)']] }, ...sizeOpt(), { type: 'note', text: 'Alt inverts mode · red = unselected' }],
+  options: [{ key: 'maskBrush.mode', label: 'Mode', type: 'select', options: [['reveal', 'Reveal (add)'], ['hide', 'Hide (remove)']] }, ...sizeOpt(), { type: 'note', text: 'Right-drag or Alt does the opposite · red = unselected' }],
   activate() { app().quickMask = true; view().requestOverlay(); },
+  optionChanged(k) { if (k === 'maskBrush.mode') bus.emit('tool', this); },
   deactivate() { app().quickMask = !!app().quickMaskSticky; view().requestOverlay(); },
   config(e) {
-    let hide = O().maskBrush.mode === 'hide'; if (e.alt) hide = !hide;
+    let hide = O().maskBrush.mode === 'hide'; if (e.alt || e.button === 2) hide = !hide;
     return { target: 'selection', rgb: '255,255,255', op: hide ? 'destination-out' : 'source-over', label: hide ? 'Hide Mask' : 'Reveal Mask' };
   }
 }));
@@ -613,6 +874,138 @@ function cloneTool(id, name, key, icon, kind) {
 }
 cloneTool('clone', 'Clone Stamp', 's', 'M9 3h6v5l3 4H6l3-4zM5 15h14v3H5zM5 21h14', 'clone');
 cloneTool('heal', 'Healing Brush', 'j', 'M4.9 13.4l8.5-8.5a3 3 0 0 1 4.2 0l1.5 1.5a3 3 0 0 1 0 4.2l-8.5 8.5a3 3 0 0 1-4.2 0l-1.5-1.5a3 3 0 0 1 0-4.2zM10 10h.01M14 14h.01M12 12h.01', 'heal');
+
+/* Skin smoothing brush — two classical retouching modes (no AI):
+ *  smooth : edge-preserving bilateral blur (smooths texture/wrinkles, stops at strong edges like eyes and lips),
+ *           computed lazily per 64 px tile from the stroke's starting pixels and painted through a soft brush.
+ *  heal   : blemish removal — a clean donor patch next to the spot is chosen by matching the surrounding ring,
+ *           then corrected by a membrane (Laplace) solve so its colour/lighting meet the surroundings seamlessly. */
+/** Bilateral filter of src (sw×sh RGBA) for the inner rect; writes RGBA into out (iw×ih). sigma: colour tolerance. */
+function bilateralTile(src, sw, sh, r, sigma, ix, iy, iw, ih, out) {
+  const st = Math.max(1, Math.floor(r / 6)), ss = Math.max(0.5, r / 2), offs = [];
+  for (let dy = -r; dy <= r; dy += st) for (let dx = -r; dx <= r; dx += st) if (dx * dx + dy * dy <= r * r) offs.push(dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * ss * ss)));
+  const lut = new Float32Array(766); for (let d = 0; d < 766; d++) lut[d] = Math.exp(-((d / sigma) ** 2) / 2);
+  for (let y = 0; y < ih; y++) for (let x = 0; x < iw; x++) {
+    const X = ix + x, Y = iy + y, i = (Y * sw + X) * 4, o = (y * iw + x) * 4, R0 = src[i], G0 = src[i + 1], B0 = src[i + 2];
+    let W = 0, r_ = 0, g_ = 0, b_ = 0;
+    for (let k = 0; k < offs.length; k += 3) {
+      const xx = X + offs[k], yy = Y + offs[k + 1];
+      if (xx < 0 || yy < 0 || xx >= sw || yy >= sh) continue;
+      const j = (yy * sw + xx) * 4; if (!src[j + 3]) continue;
+      const w = offs[k + 2] * lut[Math.abs(src[j] - R0) + Math.abs(src[j + 1] - G0) + Math.abs(src[j + 2] - B0)];
+      W += w; r_ += src[j] * w; g_ += src[j + 1] * w; b_ += src[j + 2] * w;
+    }
+    out[o] = W ? r_ / W : R0; out[o + 1] = W ? g_ / W : G0; out[o + 2] = W ? b_ / W : B0; out[o + 3] = src[i + 3];
+  }
+}
+/** Heal a disc of radius R centred (cx,cy) in a bs×bs box T (RGBA, modified in place) from candidate donor boxes.
+ * mask (optional, bs×bs 0–255) limits the change. Returns false when no donor was usable. */
+function healBox(T, donors, bs, cx, cy, R, strength, mask) {
+  const n = bs * bs, dist = new Float32Array(n);
+  for (let y = 0; y < bs; y++) for (let x = 0; x < bs; x++) dist[y * bs + x] = Math.hypot(x - cx, y - cy);
+  let best = null, bestS = Infinity;
+  for (const D of donors) { // ring similarity + smoothness inside (avoid donors that contain blemishes)
+    let ring = 0, rc = 0, mr = 0, mg = 0, mb = 0, ic = 0;
+    for (let p = 0; p < n; p++) {
+      const i = p * 4;
+      if (dist[p] >= R && dist[p] <= R + 2) { ring += (T[i] - D[i]) ** 2 + (T[i + 1] - D[i + 1]) ** 2 + (T[i + 2] - D[i + 2]) ** 2; rc++; }
+      else if (dist[p] < R) { mr += D[i]; mg += D[i + 1]; mb += D[i + 2]; ic++; }
+    }
+    if (!rc || !ic) continue;
+    mr /= ic; mg /= ic; mb /= ic;
+    let v = 0; for (let p = 0; p < n; p++) if (dist[p] < R) { const i = p * 4; v += (D[i] - mr) ** 2 + (D[i + 1] - mg) ** 2 + (D[i + 2] - mb) ** 2; }
+    const s = ring / rc + 0.5 * (v / ic);
+    if (s < bestS) { bestS = s; best = D; }
+  }
+  if (!best) return false;
+  const D = best, iters = Math.min(600, Math.max(30, Math.ceil(R * 4))), omega = 1.85;
+  for (let c = 0; c < 3; c++) {
+    const f = new Float32Array(n); let bsum = 0, bc = 0;
+    for (let p = 0; p < n; p++) if (dist[p] >= R) { f[p] = T[p * 4 + c] - D[p * 4 + c]; if (dist[p] <= R + 2) { bsum += f[p]; bc++; } }
+    const init = bc ? bsum / bc : 0;
+    for (let p = 0; p < n; p++) if (dist[p] < R) f[p] = init;
+    for (let it = 0; it < iters; it++) // SOR on the interior; the ring is the fixed boundary
+      for (let y = 1; y < bs - 1; y++) for (let x = 1; x < bs - 1; x++) {
+        const p = y * bs + x; if (dist[p] >= R) continue;
+        f[p] += omega * ((f[p - 1] + f[p + 1] + f[p - bs] + f[p + bs]) / 4 - f[p]);
+      }
+    for (let p = 0; p < n; p++) {
+      if (dist[p] >= R) continue;
+      let w = strength * Math.min(1, (R - dist[p]) / Math.max(1, R * 0.25)); if (mask) w *= mask[p] / 255;
+      const i = p * 4 + c; T[i] += (D[i] + f[p] - T[i]) * w;
+    }
+  }
+  return true;
+}
+
+def({
+  id: 'skin', name: 'Skin Smoothing Brush', key: null, cursor: 'none',
+  icon: 'M12 3a7 7.5 0 1 0 0 15a7 7.5 0 1 0 0-15M9.5 9.5h.01M14.5 9.5h.01M9.5 13.5c1.4 1 3.6 1 5 0M19 2v4M17 4h4M5 20l3-3',
+  options: [
+    { key: 'skin.mode', label: 'Mode', type: 'select', options: [['smooth', 'Smooth skin (wrinkles, texture)'], ['heal', 'Remove blemish (pimples, spots)']] },
+    { key: 'skin.size', label: 'Size', type: 'range', min: 4, max: 400, unit: 'px', log: true },
+    { key: 'skin.strength', label: 'Strength', type: 'range', min: 5, max: 100, unit: '%' },
+    { key: 'skin.radius', label: 'Smoothness', type: 'range', min: 2, max: 24, unit: 'px' },
+    { key: 'skin.detail', label: 'Keep edges', type: 'range', min: 5, max: 80 },
+    { type: 'note', text: 'Smooth: paint over skin — eyes/lips stay sharp · Blemish: click each spot with a brush a little bigger than it' }
+  ],
+  radius() { return O().skin.size / 2; },
+  down(e) {
+    const l = PP.Ops.editableLayer({ rasterizeText: true }); if (!l) return;
+    const o = O().skin;
+    if (o.mode === 'heal') { this.h = { l, edit: new M.PixelEdit(l), last: null, sm: l.selMask(doc().selection) }; this.healTo(e); return; }
+    const st = this.stroke = new Stroke({ layer: l, target: 'pixels', kind: 'clone', op: 'source-over', rgb: '0,0,0', label: 'Smooth Skin', size: o.size, hardness: 0.3, opacity: o.strength / 100, flow: 1, spacing: 12, pressure: false });
+    const proc = U.canvas(l.w, l.h), done = new Set(), r = Math.round(o.radius), sigma = Math.max(4, 90 - o.detail), T = 64, base = st.base, dab = st.dabAt.bind(st);
+    Object.assign(st, { src: proc, srcOX: l.x, srcOY: l.y, offX: 0, offY: 0 });
+    st.dabAt = (x, y, p) => { // filter only the tiles this dab touches (from the stroke's starting pixels)
+      const s = st.size / 2 + 2;
+      for (let ty = Math.max(0, Math.floor((y - s) / T)); ty <= Math.min(Math.ceil(l.h / T) - 1, Math.floor((y + s) / T)); ty++)
+        for (let tx = Math.max(0, Math.floor((x - s) / T)); tx <= Math.min(Math.ceil(l.w / T) - 1, Math.floor((x + s) / T)); tx++) {
+          const key = tx + ',' + ty; if (done.has(key)) continue; done.add(key);
+          const X = tx * T, Y = ty * T, tw = Math.min(T, l.w - X), th = Math.min(T, l.h - Y);
+          const rx = Math.max(0, X - r), ry = Math.max(0, Y - r), rw = Math.min(l.w, X + tw + r) - rx, rh = Math.min(l.h, Y + th + r) - ry;
+          const out = new ImageData(tw, th);
+          bilateralTile(U.read(base, rx, ry, rw, rh).data, rw, rh, r, sigma, X - rx, Y - ry, tw, th, out.data);
+          U.write(proc, out, X, Y);
+        }
+      dab(x, y, p);
+    };
+    st.to(e);
+  },
+  move(e) { if (this.stroke) this.stroke.to(e); else if (this.h) this.healTo(e); },
+  healTo(e) {
+    const H = this.h, l = H.l, R = Math.max(1.5, O().skin.size / 2), x = e.x - l.x, y = e.y - l.y;
+    if (!H.last) { this.spot(x, y, R); H.last = { x, y }; return; }
+    const dx = x - H.last.x, dy = y - H.last.y, d = Math.hypot(dx, dy), step = Math.max(1, R * 0.5);
+    if (d < step) return;
+    for (let t = step; t <= d; t += step) this.spot(H.last.x + (dx * t) / d, H.last.y + (dy * t) / d, R);
+    H.last = { x, y };
+  },
+  spot(x, y, R) {
+    const H = this.h, l = H.l, r = Math.ceil(R) + 2, bs = 2 * r + 1, bx = Math.round(x) - r, by = Math.round(y) - r;
+    if (bx + bs <= 0 || by + bs <= 0 || bx >= l.w || by >= l.h) return;
+    const donors = [];
+    for (let k = 0; k < 16; k++) {
+      const a = (k * Math.PI) / 8, ox = bx + Math.round(Math.cos(a) * R * 2.3), oy = by + Math.round(Math.sin(a) * R * 2.3);
+      if (ox >= 0 && oy >= 0 && ox + bs <= l.w && oy + bs <= l.h) donors.push(U.read(l.canvas, ox, oy, bs, bs).data);
+    }
+    const T = U.read(l.canvas, bx, by, bs, bs);
+    let mask = null;
+    if (H.sm) { mask = new Uint8Array(bs * bs); for (let yy = 0; yy < bs; yy++) for (let xx = 0; xx < bs; xx++) { const X = bx + xx, Y = by + yy; mask[yy * bs + xx] = X >= 0 && Y >= 0 && X < l.w && Y < l.h ? H.sm[Y * l.w + X] : 0; } }
+    if (!healBox(T.data, donors, bs, x - bx, y - by, R, O().skin.strength / 100, mask)) { if (!H.warned) { H.warned = true; toast('Too close to the edge to find clean skin nearby', 'warn'); } return; }
+    const rect = { x: bx, y: by, w: bs, h: bs };
+    H.edit.save(rect); U.write(l.canvas, T, bx, by); l.touch(rect);
+  },
+  up() {
+    if (this.stroke) { this.stroke.end(); this.stroke = null; }
+    if (this.h) { this.h.edit.commit('Remove Blemish'); this.h = null; }
+  },
+  cancel() {
+    if (this.stroke) { this.stroke.cancel(); this.stroke = null; }
+    if (this.h) { const H = this.h; for (const t of H.edit.tiles.values()) U.write(H.l.canvas, t.before, t.x, t.y); H.l.touch(); this.h = null; }
+  }
+});
+PP.SkinMath = { bilateralTile, healBox }; // exposed for checks
 
 /* Fill bucket */
 def({
@@ -773,38 +1166,74 @@ shapeTool('rrect', 'Rounded Rectangle', null, 'M7 5h10a3 3 0 0 1 3 3v8a3 3 0 0 1
 shapeTool('ellipse', 'Ellipse', null, 'M3 12a9 7 0 1 0 18 0a9 7 0 1 0-18 0', 'ellipse');
 shapeTool('polygon', 'Polygon', null, 'M12 3l9 7-3.5 10h-11L3 10z', 'polygon');
 
-/* Free transform (Ctrl+T): move inside, scale with handles (Shift keeps aspect), rotate outside (Shift snaps 15°). */
+/* Free transform (Ctrl+T, or drag a Move-tool handle): drag inside to move, square handles to resize
+ * (Shift keeps proportions), the round knob — or anywhere outside — to rotate (Shift snaps 15°).
+ * Live preview only; Enter / Apply / switching tools bakes it in one step, Esc cancels. */
+const ROT_KNOB = 26; // screen px above the top edge
+function rotKnob(v, top, centre) { // knob position beyond the top-centre handle, away from the centre
+  const dx = top.x - centre.x, dy = top.y - centre.y, L = Math.hypot(dx, dy) || 1, k = (ROT_KNOB * v.dpr) / v.scale / L;
+  return { x: top.x + dx * k, y: top.y + dy * k };
+}
+function drawKnob(g, v, top, knob) {
+  g.beginPath(); g.moveTo(v.X(top.x), v.Y(top.y)); g.lineTo(v.X(knob.x), v.Y(knob.y));
+  g.lineWidth = v.dpr; g.strokeStyle = '#fff'; g.stroke();
+  g.beginPath(); g.arc(v.X(knob.x), v.Y(knob.y), 5.5 * v.dpr, 0, Math.PI * 2);
+  g.fillStyle = '#4f9dff'; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 1.5 * v.dpr; g.stroke();
+}
+const ROT_CURSOR = 'url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2724%27 height=%2724%27 viewBox=%270 0 24 24%27%3E%3Cpath d=%27M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5%27 fill=%27none%27 stroke=%27white%27 stroke-width=%274%27/%3E%3Cpath d=%27M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5%27 fill=%27none%27 stroke=%27black%27 stroke-width=%272%27/%3E%3C/svg%3E") 12 12, crosshair';
+
 def({
-  id: 'transform', name: 'Free Transform', key: null, cursor: 'default', hidden: true,
+  id: 'transform', name: 'Transform Layer', key: null, cursor: 'default', hidden: true,
   icon: 'M4 4h4v4H4zM16 4h4v4h-4zM4 16h4v4H4zM16 16h4v4h-4zM8 6h8M8 18h8M6 8v8M18 8v8',
   options: [
     { key: 'xf.sx', label: 'W %', type: 'number', live: true }, { key: 'xf.sy', label: 'H %', type: 'number', live: true }, { key: 'xf.rot', label: 'Angle °', type: 'number', live: true },
-    { type: 'button', label: 'Apply', action: () => PP.app.tools.current.commit() }, { type: 'button', label: 'Cancel', action: () => PP.app.tools.cancel() }
+    { type: 'button', label: 'Apply', action: () => PP.app.tools.byId.get('transform').commit() }, { type: 'button', label: 'Cancel', action: () => PP.app.tools.cancel() },
+    { type: 'note', text: 'Squares resize (Shift keeps ratio) · round knob rotates (Shift snaps 15°) · drag inside moves · Enter applies · Esc cancels' }
   ],
   activate() {
     const l = PP.Ops.editableLayer({ rasterizeText: true });
     if (!l) { PP.app.tools.select(this.prev || 'move'); return; }
-    this.l = l; this.st = { tx: 0, ty: 0, sx: 1, sy: 1, rot: 0 };
+    this.tl = l; this.st = { tx: 0, ty: 0, sx: 1, sy: 1, rot: 0 };
     O().xf = { sx: 100, sy: 100, rot: 0 };
     this.apply();
   },
-  deactivate() { if (this.l) { this.l.xform = null; this.l = null; bus.emit('pixels', { rect: null }); } },
+  deactivate() { this.bake(); }, // switching tools keeps the change, like MS Paint
+  /** Write the previewed transform into the layer (one undo step); pure moves stay lossless. */
+  bake() {
+    const l = this.tl; if (!l) return;
+    const s = this.st, m = this.matrix(); l.xform = null; this.tl = null; this.drag = null;
+    if (s.sx === 1 && s.sy === 1 && !s.rot) {
+      const x0 = l.x, y0 = l.y; l.x += Math.round(s.tx); l.y += Math.round(s.ty);
+      PP.Ops.recordMove(l, x0, y0); bus.emit('pixels', { rect: null });
+    } else PP.Ops.applyTransform(l, m, 'Transform Layer');
+  },
   matrix() {
-    const l = this.l, s = this.st, c = Math.cos(s.rot), n = Math.sin(s.rot), cx = l.x + l.w / 2 + s.tx, cy = l.y + l.h / 2 + s.ty;
+    const l = this.tl, s = this.st, c = Math.cos(s.rot), n = Math.sin(s.rot), cx = l.x + l.w / 2 + s.tx, cy = l.y + l.h / 2 + s.ty;
     const a = c * s.sx, b = n * s.sx, cc = -n * s.sy, d = c * s.sy;
     return { a, b, c: cc, d, e: cx - a * (l.w / 2) - cc * (l.h / 2), f: cy - b * (l.w / 2) - d * (l.h / 2) };
   },
   pt(m, x, y) { return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f }; },
-  apply() { if (!this.l) return; this.l.xform = this.matrix(); O().xf = { sx: +(this.st.sx * 100).toFixed(2), sy: +(this.st.sy * 100).toFixed(2), rot: +((this.st.rot * 180) / Math.PI).toFixed(2) }; bus.emit('pixels', { rect: null }); bus.emit('options-values'); },
-  optionChanged() { const x = O().xf; if (!this.l) return; this.st.sx = (+x.sx || 100) / 100; this.st.sy = (+x.sy || 100) / 100; this.st.rot = ((+x.rot || 0) * Math.PI) / 180; this.l.xform = this.matrix(); bus.emit('pixels', { rect: null }); },
-  handles() { const l = this.l, m = this.matrix(), out = []; for (const hy of [-1, 0, 1]) for (const hx of [-1, 0, 1]) if (hx || hy) out.push({ hx, hy, p: this.pt(m, ((hx + 1) / 2) * l.w, ((hy + 1) / 2) * l.h) }); return out; },
-  down(e) {
-    if (!this.l) return;
-    const v = view(), tol = 8 * v.dpr / v.scale;
+  apply() { if (!this.tl) return; this.tl.xform = this.matrix(); O().xf = { sx: +(this.st.sx * 100).toFixed(2), sy: +(this.st.sy * 100).toFixed(2), rot: +((this.st.rot * 180) / Math.PI).toFixed(2) }; bus.emit('pixels', { rect: null }); bus.emit('options-values'); },
+  optionChanged() { const x = O().xf; if (!this.tl) return; this.st.sx = (+x.sx || 100) / 100; this.st.sy = (+x.sy || 100) / 100; this.st.rot = ((+x.rot || 0) * Math.PI) / 180; this.tl.xform = this.matrix(); bus.emit('pixels', { rect: null }); },
+  handles() { const l = this.tl, m = this.matrix(), out = []; for (const hy of [-1, 0, 1]) for (const hx of [-1, 0, 1]) if (hx || hy) out.push({ hx, hy, p: this.pt(m, ((hx + 1) / 2) * l.w, ((hy + 1) / 2) * l.h) }); return out; },
+  knob() { const l = this.tl, m = this.matrix(), top = this.pt(m, l.w / 2, 0); return { top, knob: rotKnob(view(), top, this.pt(m, l.w / 2, l.h / 2)) }; },
+  hit(e) {
+    const v = view(), tol = (8 * v.dpr) / v.scale, k = this.knob().knob;
+    if (Math.hypot(k.x - e.x, k.y - e.y) < tol * 1.2) return { kind: 'rotate' };
     const h = this.handles().find(h => Math.hypot(h.p.x - e.x, h.p.y - e.y) < tol);
+    if (h) return { kind: 'scale', h };
     const m = this.matrix(), det = m.a * m.d - m.b * m.c, lx = (m.d * (e.x - m.e) - m.c * (e.y - m.f)) / det, ly = (-m.b * (e.x - m.e) + m.a * (e.y - m.f)) / det;
-    const inside = lx >= 0 && ly >= 0 && lx <= this.l.w && ly <= this.l.h;
-    this.drag = { kind: h ? 'scale' : inside ? 'move' : 'rotate', h, e0: { x: e.x, y: e.y }, st: Object.assign({}, this.st), c: { x: this.l.x + this.l.w / 2 + this.st.tx, y: this.l.y + this.l.h / 2 + this.st.ty } };
+    return { kind: lx >= 0 && ly >= 0 && lx <= this.tl.w && ly <= this.tl.h ? 'move' : 'rotate', outside: true };
+  },
+  down(e) {
+    if (!this.tl) return;
+    const H = this.hit(e);
+    this.drag = { kind: H.kind, h: H.h, e0: { x: e.x, y: e.y }, st: Object.assign({}, this.st), c: { x: this.tl.x + this.tl.w / 2 + this.st.tx, y: this.tl.y + this.tl.h / 2 + this.st.ty } };
+  },
+  hoverMove(e) {
+    if (!this.tl) return;
+    const H = this.hit(e), c = this.st.rot;
+    view().over.style.cursor = H.kind === 'move' ? 'move' : H.kind === 'rotate' ? ROT_CURSOR : RESIZE_CURSOR[resizeKey(H.h.hx, H.h.hy, c)];
   },
   move(e) {
     const D = this.drag; if (!D) return;
@@ -816,7 +1245,7 @@ def({
       st.rot = a;
     } else {
       const c = Math.cos(s0.rot), n = Math.sin(s0.rot), dx = e.x - D.c.x, dy = e.y - D.c.y;
-      const lx = c * dx + n * dy, ly = -n * dx + c * dy, W = this.l.w, H = this.l.h, { hx, hy } = D.h;
+      const lx = c * dx + n * dy, ly = -n * dx + c * dy, W = this.tl.w, H = this.tl.h, { hx, hy } = D.h;
       let sx = s0.sx, sy = s0.sy, shx = 0, shy = 0;
       if (hx) { const fixed = -hx * (W * s0.sx) / 2, nw = (lx - fixed) * hx; sx = (nw / W) * Math.sign(s0.sx) || 0.001; }
       if (hy) { const fixed = -hy * (H * s0.sy) / 2, nh = (ly - fixed) * hy; sy = (nh / H) * Math.sign(s0.sy) || 0.001; }
@@ -828,21 +1257,215 @@ def({
     this.apply();
   },
   up() { this.drag = null; },
-  commit() {
-    if (!this.l) return;
-    const l = this.l, m = this.matrix(); l.xform = null; this.l = null;
-    PP.Ops.applyTransform(l, m);
-    PP.app.tools.select(this.prev || 'move');
-  },
-  cancel() { if (this.l) { this.l.xform = null; this.l = null; bus.emit('pixels', { rect: null }); } if (!PP.app.tools.switching) PP.app.tools.select(this.prev || 'move'); },
+  abort() { const D = this.drag; this.drag = null; if (D && this.tl) { Object.assign(this.st, D.st); this.apply(); } },
+  commit() { this.bake(); PP.app.tools.select(this.prev || 'move'); },
+  cancel() { if (this.tl) { this.tl.xform = null; this.tl = null; this.drag = null; bus.emit('pixels', { rect: null }); } if (!PP.app.tools.switching) PP.app.tools.select(this.prev || 'move'); },
   onKey(e) { if (e.key === 'Enter') { this.commit(); return true; } return false; },
   overlay(g, v) {
-    if (!this.l) return;
-    const m = this.matrix(), l = this.l, c = [[0, 0], [l.w, 0], [l.w, l.h], [0, l.h]].map(([x, y]) => this.pt(m, x, y));
+    if (!this.tl) return;
+    const m = this.matrix(), l = this.tl, c = [[0, 0], [l.w, 0], [l.w, l.h], [0, l.h]].map(([x, y]) => this.pt(m, x, y));
     strokeDocPath(g, v, c, true);
+    const k = this.knob(); drawKnob(g, v, k.top, k.knob);
     for (const h of this.handles()) handle(g, v, h.p.x, h.p.y);
+    PP.UI && PP.UI.status({ sel: `${Math.round(Math.abs(l.w * this.st.sx))} × ${Math.round(Math.abs(l.h * this.st.sy))} · ${(+((this.st.rot * 180) / Math.PI).toFixed(1))}°` });
   }
 });
+/** Resize cursor for a handle, turned with the layer's rotation (nearest 45°). */
+function resizeKey(hx, hy, rot) {
+  const a = Math.atan2(hy, hx) + rot, q = ((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8;
+  return ['1,0', '1,1', '0,1', '-1,1', '-1,0', '-1,-1', '0,-1', '1,-1'][q];
+}
+
+/* Floating selection (MS Paint style): pasted or lifted pixels hover above the active layer until stamped.
+ * Drag inside to move, drag handles to resize (Shift / Keep ratio holds proportions), arrows nudge (Shift 10 px).
+ * Enter, clicking outside or switching tools stamps it down; Esc puts everything back; Delete discards it. */
+function floatImage(f) {
+  if (!O().paste.transparent) return f.src;
+  const key = app().colors.bg;
+  if (f.kKey !== key) { // knock out pixels matching the background colour
+    const c = U.clone(f.src), img = U.read(c), d = img.data, [r, g, b] = bgc();
+    for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - r) <= 12 && Math.abs(d[i + 1] - g) <= 12 && Math.abs(d[i + 2] - b) <= 12) d[i + 3] = 0;
+    U.write(c, img); f.kImg = c; f.kKey = key;
+  }
+  return f.kImg;
+}
+const RESIZE_CURSOR = { '-1,-1': 'nwse-resize', '1,1': 'nwse-resize', '1,-1': 'nesw-resize', '-1,1': 'nesw-resize', '0,-1': 'ns-resize', '0,1': 'ns-resize', '-1,0': 'ew-resize', '1,0': 'ew-resize' };
+const floatTool = () => PP.app.tools.byId.get('paste');
+
+def({
+  id: 'paste', name: 'Floating Selection', key: null, cursor: 'move', hidden: true,
+  icon: 'M4 4h16v16H4z',
+  options: [
+    { key: 'paste.x', label: 'X', type: 'number' }, { key: 'paste.y', label: 'Y', type: 'number' },
+    { key: 'paste.w', label: 'W', type: 'number' }, { key: 'paste.h', label: 'H', type: 'number' },
+    { key: 'paste.ratio', label: 'Keep ratio', type: 'check' }, { key: 'paste.transparent', label: 'Transparent (bg colour)', type: 'check' },
+    { type: 'button', label: 'Flip H', action: () => floatTool().flip('h') }, { type: 'button', label: 'Flip V', action: () => floatTool().flip('v') },
+    { type: 'button', label: 'Rotate 90°', action: () => floatTool().flip('r') },
+    { type: 'button', label: 'Done', action: () => floatTool().commit() }, { type: 'button', label: 'Delete', action: () => floatTool().drop() },
+    { type: 'note', text: 'Drag to move · handles resize · arrows nudge · Enter or click outside to place · Esc cancels' }
+  ],
+  f: null, pending: null, shown: null,
+  activate() {
+    const p = this.pending; this.pending = null;
+    if (!p) { PP.app.tools.select(this.prev || 'rect-select'); return; }
+    const s = doc().selection;
+    const f = this.f = app().floating = Object.assign({ w: p.src.width, h: p.src.height, sel: s.mask ? P.rleEncode(s.mask) : null }, p);
+    f.image = () => floatImage(f);
+    f.render = () => { const c = U.canvas(f.w, f.h), g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(floatImage(f), 0, 0, f.w, f.h); return c; };
+    s.set(null); // the float replaces the selection; restored if cancelled or undone
+    this.touch();
+  },
+  deactivate() { this.finish('stamp'); },
+  /** Repaint the old and new float area and mirror geometry into the options bar. */
+  touch() {
+    const f = this.f; if (!f) return;
+    const r = U.snap({ x: f.x - 1, y: f.y - 1, w: f.w + 2, h: f.h + 2 });
+    bus.emit('pixels', { rect: U.union(this.shown, r) }); this.shown = r;
+    if (f.ownLayer) { // show the pasted layer itself at the float's geometry
+      const l = f.layer; l.preview = floatImage(f);
+      l.xform = { a: f.w / f.src.width, b: 0, c: 0, d: f.h / f.src.height, e: f.x, f: f.y };
+    }
+    Object.assign(O().paste, { x: f.x, y: f.y, w: f.w, h: f.h });
+    bus.emit('options-values'); view().requestOverlay();
+  },
+  /** mode: 'stamp' draws it onto the layer, 'drop' discards it (a lifted hole stays), 'revert' restores everything. */
+  finish(mode) {
+    const f = this.f; if (!f) return;
+    this.f = app().floating = null; this.drag = null;
+    bus.emit('pixels', { rect: this.shown }); this.shown = null;
+    const l = f.layer, d = doc(), sel = d.selection, n = sel.w * sel.h;
+    const restoreSel = () => sel.set(f.sel ? P.rleDecode(f.sel, n) : null);
+    if (f.ownLayer) {
+      const h = PP.app.history; l.xform = null; l.preview = null;
+      if (mode !== 'stamp') { // Esc / Delete take the whole paste (and its layer) back
+        if (h.index === f.hist) { h.undo(); h.stack.splice(h.index + 1); bus.emit('history'); } else restoreSel();
+        return;
+      }
+      if (f.src === l.canvas && f.w === l.w && f.h === l.h && !O().paste.transparent) {
+        const x0 = l.x, y0 = l.y; l.x = f.x; l.y = f.y; PP.Ops.recordMove(l, x0, y0); bus.emit('pixels', { rect: null });
+      } else M.docCommand('Resize Pasted', () => { l.canvas = f.render(); l.x = f.x; l.y = f.y; l.rev++; });
+      return;
+    }
+    if (mode === 'revert') {
+      if (f.edit) { for (const t of f.edit.tiles.values()) U.write(l.canvas, t.before, t.x, t.y); l.touch(); }
+      restoreSel(); return;
+    }
+    const h = PP.app.history, wrapTop = () => Object.assign(h.stack[h.index], { selBefore: f.sel, selAfter: null, selN: n }); // one undo step also brings the selection back
+    const edit = f.edit || new M.PixelEdit(l);
+    if (mode === 'stamp') {
+      const r = U.intersect(U.snap({ x: f.x - l.x, y: f.y - l.y, w: f.w, h: f.h }), { x: 0, y: 0, w: l.w, h: l.h });
+      if (r) {
+        edit.save(r);
+        const g = l.canvas.getContext('2d'); g.save(); g.imageSmoothingQuality = 'high';
+        g.drawImage(floatImage(f), f.x - l.x, f.y - l.y, f.w, f.h); g.restore();
+        l.touch(r);
+      }
+    }
+    if (edit.commit(mode === 'drop' ? 'Delete Selection' : f.label)) wrapTop();
+    else if (f.sel) h.push(M.entry('sel', 'Deselect', { before: f.sel, after: null, n }));
+  },
+  done(mode) { this.finish(mode); if (!PP.app.tools.switching && PP.app.tools.current === this) PP.app.tools.select(this.prev || 'rect-select'); },
+  commit() { this.done('stamp'); },
+  drop() { this.done('drop'); },
+  cancel() { this.done('revert'); },
+  optionChanged(k) {
+    const f = this.f, o = O().paste; if (!f) return;
+    if (k === 'paste.w' || k === 'paste.h') {
+      let w = Math.max(1, Math.round(+o.w) || f.w), h = Math.max(1, Math.round(+o.h) || f.h);
+      if (o.ratio) { if (k === 'paste.w') h = Math.max(1, Math.round((w * f.h) / f.w)); else w = Math.max(1, Math.round((h * f.w) / f.h)); }
+      if (!U.validSize(w, h)) { toast('Too large', 'warn'); this.touch(); return; }
+      f.w = w; f.h = h;
+    } else if (k === 'paste.x' || k === 'paste.y') { f.x = Math.round(+o.x) || 0; f.y = Math.round(+o.y) || 0; }
+    else if (k === 'paste.transparent') f.kKey = null;
+    this.touch();
+  },
+  flip(kind) {
+    const f = this.f; if (!f) return;
+    const s = f.src, rot = kind === 'r', c = U.canvas(rot ? s.height : s.width, rot ? s.width : s.height), g = c.getContext('2d');
+    if (kind === 'h') { g.translate(c.width, 0); g.scale(-1, 1); } else if (kind === 'v') { g.translate(0, c.height); g.scale(1, -1); } else { g.translate(c.width, 0); g.rotate(Math.PI / 2); }
+    g.drawImage(s, 0, 0); f.src = c; f.kKey = null;
+    if (rot) { const cx = f.x + f.w / 2, cy = f.y + f.h / 2; [f.w, f.h] = [f.h, f.w]; f.x = Math.round(cx - f.w / 2); f.y = Math.round(cy - f.h / 2); }
+    this.touch();
+  },
+  hit(e) {
+    const f = this.f, v = view(), tol = (7 * v.dpr) / v.scale;
+    if (f.w * v.scale >= 20 * v.dpr && f.h * v.scale >= 20 * v.dpr) { // tiny floats: whole box moves; use W/H to resize
+      for (const hy of [-1, 0, 1]) for (const hx of [-1, 0, 1]) {
+        if (!hx && !hy) continue;
+        if (Math.abs(e.x - (f.x + ((hx + 1) / 2) * f.w)) <= tol && Math.abs(e.y - (f.y + ((hy + 1) / 2) * f.h)) <= tol) return { hx, hy };
+      }
+    }
+    return e.x >= f.x && e.y >= f.y && e.x <= f.x + f.w && e.y <= f.y + f.h ? 'in' : null;
+  },
+  down(e) {
+    const f = this.f; if (!f) return;
+    const h = this.hit(e);
+    if (!h) { // clicking outside places it and hands the click to the previous tool (e.g. starts a new marquee)
+      const tm = PP.app.tools; this.commit();
+      if (tm.current !== this) { tm.active = true; tm.current.down && tm.current.down(e); }
+      return;
+    }
+    this.drag = { h, e0: { x: e.x, y: e.y }, r0: { x: f.x, y: f.y, w: f.w, h: f.h } };
+  },
+  move(e) {
+    const D = this.drag, f = this.f; if (!D || !f) return;
+    let dx = e.x - D.e0.x, dy = e.y - D.e0.y;
+    const r = D.r0;
+    if (D.h === 'in') {
+      if (e.shift) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+      f.x = Math.round(r.x + dx); f.y = Math.round(r.y + dy);
+    } else {
+      const { hx, hy } = D.h;
+      let x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+      if (hx < 0) x0 = Math.min(x1 - 1, Math.round(r.x + dx)); else if (hx > 0) x1 = Math.max(x0 + 1, Math.round(r.x + r.w + dx));
+      if (hy < 0) y0 = Math.min(y1 - 1, Math.round(r.y + dy)); else if (hy > 0) y1 = Math.max(y0 + 1, Math.round(r.y + r.h + dy));
+      let w = x1 - x0, h = y1 - y0;
+      if ((e.shift || O().paste.ratio) && hx && hy) {
+        const k = Math.max(w / r.w, h / r.h); w = Math.max(1, Math.round(r.w * k)); h = Math.max(1, Math.round(r.h * k));
+        if (hx < 0) x0 = x1 - w; if (hy < 0) y0 = y1 - h;
+      }
+      if (!U.validSize(w, h)) return;
+      f.x = x0; f.y = y0; f.w = w; f.h = h;
+    }
+    this.touch();
+  },
+  up() { this.drag = null; },
+  /** Interrupted gesture (pinch, pointercancel, tool switch mid-drag): undo just this drag, keep the float. */
+  abort() { const D = this.drag; this.drag = null; if (D && this.f) { Object.assign(this.f, D.r0); this.touch(); } },
+  hoverMove(e) {
+    if (!this.f) return;
+    const h = this.hit(e);
+    view().over.style.cursor = !h ? 'default' : h === 'in' ? 'move' : RESIZE_CURSOR[h.hx + ',' + h.hy];
+  },
+  onKey(e) {
+    const f = this.f; if (!f) return false;
+    const k = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+    if (k) { const n = e.shiftKey ? 10 : 1; f.x += k[0] * n; f.y += k[1] * n; this.touch(); return true; }
+    if (e.key === 'Enter') { this.commit(); return true; }
+    if (e.key === 'Escape') { this.cancel(); return true; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { this.drop(); return true; }
+    return false;
+  },
+  overlay(g, v) {
+    const f = this.f; if (!f) return;
+    strokeDocRect(g, v, f, true);
+    if (f.w * v.scale >= 20 * v.dpr && f.h * v.scale >= 20 * v.dpr) for (const hy of [0, 0.5, 1]) for (const hx of [0, 0.5, 1]) if (hx !== 0.5 || hy !== 0.5) handle(g, v, f.x + hx * f.w, f.y + hy * f.h);
+    PP.UI && PP.UI.status({ sel: `${f.w} × ${f.h} at ${f.x}, ${f.y}` });
+  }
+});
+
+/** Begin a floating selection. p: {src, x, y, layer, edit?, label}. Any current float is stamped first. */
+function startFloat(p) {
+  const tm = PP.app.tools, t = floatTool();
+  settleFloat();
+  t.pending = p; tm.select('paste');
+  return tm.current === t;
+}
+/** Finish any live, uncommitted edit (floating paste or layer transform) before another command runs. */
+function settleFloat() {
+  const t = floatTool(); if (t.f) t.commit();
+  const x = PP.app.tools.byId.get('transform'); if (PP.app.tools.current === x && x.tl) x.commit();
+}
 
 /* ───────────── ToolManager ───────────── */
 class ToolManager {
@@ -856,15 +1479,15 @@ class ToolManager {
     const t = this.byId.get(id); if (!t || t === this.current) return;
     const prev = this.current;
     this.switching = true;
-    try { if (prev) { if (prev.cancel && (this.active || prev.pts || prev.r || prev.l)) prev.cancel(); prev.deactivate && prev.deactivate(); } }
+    try { if (prev) { if (this.active && prev.abort) prev.abort(); else if (prev.cancel && (this.active || prev.pts || prev.r || prev.l)) prev.cancel(); prev.deactivate && prev.deactivate(); } }
     finally { this.switching = false; }
     this.active = false;
-    t.prev = prev && prev.id !== 'transform' ? prev.id : t.prev;
+    t.prev = prev && !prev.hidden ? prev.id : t.prev;
     this.current = t;
     this.view.over.style.cursor = t.cursor || 'default';
     t.activate && t.activate();
     if (this.current !== t) return; // activate() redirected to another tool
-    if (t.id !== 'transform') try { localStorage.setItem('pp.tool', id); } catch (e) { /* storage blocked */ }
+    if (!t.hidden) try { localStorage.setItem('pp.tool', id); } catch (e) { /* storage blocked */ }
     bus.emit('tool', t);
     this.view.requestOverlay();
   }
@@ -881,12 +1504,12 @@ class ToolManager {
       e.preventDefault(); el.focus && el.focus();
       if (e.pointerType === 'touch') {
         this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-        if (this.touches.size === 2) { if (this.active) { this.current.cancel && this.current.cancel(); this.active = false; } this.startPinch(); return; }
+        if (this.touches.size === 2) { if (this.active) { this.interrupt(); this.active = false; } this.startPinch(); return; }
         if (this.touches.size > 2) return;
       }
       try { el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       if (e.button === 1 || this.spaceHeld || (e.button === 0 && this.current.id === 'hand')) { this.temp = { x: e.clientX, y: e.clientY }; el.style.cursor = 'grabbing'; return; }
-      if (e.button !== 0 && !(e.button === 2 && this.current.id === 'picker')) return;
+      if (e.button !== 0 && !(e.button === 2 && (this.current.id === 'picker' || this.current.rightClick))) return;
       this.active = true;
       this.current.down && this.current.down(this.ev(e));
       this.view.requestOverlay();
@@ -910,7 +1533,7 @@ class ToolManager {
       if (this.temp) { this.temp = null; el.style.cursor = this.spaceHeld ? 'grab' : this.current.cursor || 'default'; return; }
       if (!this.active) return;
       this.active = false;
-      if (cancelled) this.current.cancel && this.current.cancel(); else this.current.up && this.current.up(this.ev(e));
+      if (cancelled) this.interrupt(); else this.current.up && this.current.up(this.ev(e));
       this.view.requestOverlay();
     };
     el.addEventListener('pointerup', e => end(e, false));
@@ -925,6 +1548,7 @@ class ToolManager {
       else this.view.panBy(-(e.shiftKey ? e.deltaY : e.deltaX) * k, -(e.shiftKey ? 0 : e.deltaY) * k);
     }, { passive: false });
   }
+  interrupt() { const t = this.current; if (t.abort) t.abort(); else t.cancel && t.cancel(); }
   startPinch() {
     const [a, b] = [...this.touches.values()];
     this.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, c: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, z: this.view.zoom };
@@ -940,5 +1564,5 @@ class ToolManager {
   }
 }
 
-PP.Tools = { ToolManager, list: tools, Stroke, rasterMask, scratchCanvas };
+PP.Tools = { ToolManager, list: tools, Stroke, rasterMask, scratchCanvas, startFloat, settleFloat, selBrush };
 })();
