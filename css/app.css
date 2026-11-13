@@ -76,6 +76,8 @@ body.panels-hidden .panel { display: none; }
 .empty p { margin: 0; color: var(--fg-dim); }
 .empty-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 8px 0; }
 body.has-doc .empty { display: none; }
+.empty-credit { margin-top: 18px !important; font-size: 12px; color: var(--fg-dim); }
+.empty-credit a { color: var(--accent); }
 body:not(.has-doc) .options, body:not(.has-doc) .panel { pointer-events: none; opacity: .45; }
 body.busy .stage { cursor: progress; }
 
